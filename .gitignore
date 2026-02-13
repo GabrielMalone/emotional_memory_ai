@@ -1,0 +1,55 @@
+# --------------------
+# Python
+# --------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# --------------------
+# Virtual environments
+# --------------------
+venv/
+.env
+.env.*
+
+# --------------------
+# OS / Editor junk
+# --------------------
+.DS_Store
+.vscode/
+.idea/
+
+# --------------------
+# Caches / temp
+# --------------------
+*.log
+*.tmp
+.cache/
+.pytest_cache/
+
+# --------------------
+# Audio / generated media
+# --------------------
+tts_cache/
+recordings/
+*.mp3
+*.wav
+
+# --------------------
+# Secrets / certs
+# --------------------
+*.pem
+*.key
+
+# --------------------
+# Database artifacts
+# --------------------
+*.sqlite
+*.db
+
+# --------------------
+# Build artifacts
+# --------------------
+dist/
+build/
