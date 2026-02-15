@@ -134,32 +134,32 @@ CREATE TABLE IF NOT EXISTS `camodb`.`relationshipType` (
 ENGINE = InnoDB
 DEFAULT CHARACTER SET = utf8mb4;
 
-
 -- -----------------------------------------------------
 -- Table `camodb`.`playerNPCrelationship`
 -- -----------------------------------------------------
 CREATE TABLE IF NOT EXISTS `camodb`.`playerNPCrelationship` (
   `idUser` INT NOT NULL,
   `idNPC` INT NOT NULL,
-  `idRelationshipType` INT NOT NULL,
-  `relTypeIntensity` FLOAT NOT NULL,
-  `trust` FLOAT NULL,
+  `trust` FLOAT NOT NULL DEFAULT 30,
+  `wasEnemy` TINYINT(1) NOT NULL DEFAULT 0,
+
   PRIMARY KEY (`idUser`, `idNPC`),
-  INDEX `idNPC` (`idNPC` ASC) VISIBLE,
-  INDEX `idRelationshipType` (`idRelationshipType` ASC) VISIBLE,
+
+  INDEX `idx_playerNPC_idNPC` (`idNPC` ASC) VISIBLE,
+
   CONSTRAINT `fk_rel_npc`
     FOREIGN KEY (`idNPC`)
     REFERENCES `camodb`.`NPC` (`idNPC`)
-    ON DELETE CASCADE,
-  CONSTRAINT `fk_rel_type`
-    FOREIGN KEY (`idRelationshipType`)
-    REFERENCES `camodb`.`relationshipType` (`idRelationshipType`)
-    ON DELETE RESTRICT,
+    ON DELETE CASCADE
+    ON UPDATE NO ACTION,
+
   CONSTRAINT `fk_rel_user`
     FOREIGN KEY (`idUser`)
     REFERENCES `camodb`.`user` (`idUser`)
-    ON DELETE CASCADE)
-ENGINE = InnoDB
+    ON DELETE CASCADE
+    ON UPDATE NO ACTION
+
+) ENGINE = InnoDB
 DEFAULT CHARACTER SET = utf8mb4;
 
 
@@ -375,28 +375,28 @@ ENGINE = InnoDB;
 CREATE TABLE IF NOT EXISTS `camodb`.`npcNPCrelationship` (
   `idNPC_1` INT NOT NULL,
   `idNPC_2` INT NOT NULL,
-  `idRelationshipType` INT NOT NULL,
-  `relTypeIntensity` FLOAT NOT NULL,
-  `trust` FLOAT NOT NULL,
+  `trust` FLOAT NOT NULL DEFAULT 50,
+  `wasEnemy` TINYINT(1) NOT NULL DEFAULT 0,
+
   PRIMARY KEY (`idNPC_1`, `idNPC_2`),
-  INDEX `fk_npcNPCrelationship_NPC1_idx` (`idNPC_1` ASC) VISIBLE,
-  INDEX `fk_npcNPCrelationship_NPC2_idx` (`idNPC_2` ASC) VISIBLE,
-  CONSTRAINT `fk_npcNPCrelationship_relationshipType1`
-    FOREIGN KEY (`idRelationshipType`)
-    REFERENCES `camodb`.`relationshipType` (`idRelationshipType`)
-    ON DELETE NO ACTION
-    ON UPDATE NO ACTION,
+
+  INDEX `idx_npcNPC_idNPC1` (`idNPC_1` ASC) VISIBLE,
+  INDEX `idx_npcNPC_idNPC2` (`idNPC_2` ASC) VISIBLE,
+
   CONSTRAINT `fk_npcNPCrelationship_NPC1`
     FOREIGN KEY (`idNPC_1`)
     REFERENCES `camodb`.`NPC` (`idNPC`)
-    ON DELETE NO ACTION
+    ON DELETE CASCADE
     ON UPDATE NO ACTION,
+
   CONSTRAINT `fk_npcNPCrelationship_NPC2`
     FOREIGN KEY (`idNPC_2`)
     REFERENCES `camodb`.`NPC` (`idNPC`)
-    ON DELETE NO ACTION
-    ON UPDATE NO ACTION)
-ENGINE = InnoDB;
+    ON DELETE CASCADE
+    ON UPDATE NO ACTION
+
+) ENGINE = InnoDB
+DEFAULT CHARACTER SET = utf8mb4;
 
 
 -- -----------------------------------------------------
@@ -465,10 +465,58 @@ CREATE TABLE npc_persona (
     ON DELETE CASCADE
 );
 
+-- -----------------------------------------------------
+-- Table `camodb`.`npc_user_belief`
+-- -----------------------------------------------------
+DROP TABLE IF EXISTS npc_user_belief;
 
-SET SQL_MODE=@OLD_SQL_MODE;
-SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;
-SET UNIQUE_CHECKS=@OLD_UNIQUE_CHECKS;
+CREATE TABLE npc_user_belief (
+  idNPC INT NOT NULL,
+  idUser INT NOT NULL,
+
+  beliefType ENUM(
+    'current_emotion',
+    'moral_alignment',
+    'age',
+    'gender',
+    'life_story',
+    'personality_trait',
+    'secret',
+    'goal'
+  ) NOT NULL,
+
+  beliefValue VARCHAR(255) NOT NULL,
+
+  beliefSource ENUM(
+    'dialogue',
+    'task',
+    'emotion_analysis',
+    'third_party',
+    'inference'
+  ) DEFAULT 'dialogue',
+
+  confidence FLOAT NOT NULL DEFAULT 0.5,
+
+  evidence TEXT NULL,
+
+  updatedAt DATETIME NOT NULL
+    DEFAULT CURRENT_TIMESTAMP
+    ON UPDATE CURRENT_TIMESTAMP,
+
+  PRIMARY KEY (idNPC, idUser, beliefType, beliefValue),
+
+  INDEX idx_lookup (idNPC, idUser),
+
+  CONSTRAINT fk_belief_npc
+    FOREIGN KEY (idNPC)
+    REFERENCES NPC(idNPC)
+    ON DELETE CASCADE,
+
+  CONSTRAINT fk_belief_user
+    FOREIGN KEY (idUser)
+    REFERENCES user(idUser)
+    ON DELETE CASCADE
+);
 
 -- -----------------------------------------------------
 -- Seed data
@@ -486,55 +534,19 @@ VALUES
   ('calm'),
   ('excited');
 
-
--- Relationship types
-INSERT INTO relationshipType
-(idRelationshipType, typeRelationship, descriptionRelationship)
-VALUES
-(1, 'friend',  'Friendly / positive relationship'),
-(2, 'stranger', 'person unkown'),
-(3, 'enemy', 'hostile feelings'),
-(4, 'acquaintance',  'someone just met or only met a few times'),
-(5, 'mentor',  'teacher role'),
-(6, 'family',  'related to the player/npc');
-
 -- initial users
 
 INSERT INTO user
 (userName, nameFirst, nameLast)
 VALUES
-('Gabe', 'Gabriel', 'Malone'),
-('Lisa', 'Lisa', 'Gilmore'),
-('Soheil', 'Soheil', 'Saneei');
+('Gabe', 'Gabriel', 'Malone');
 
 -- initial NPCs
 INSERT INTO NPC
 (nameFirst, nameLast, age, gender)
 VALUES
 ('Emory',  NULL,        26, 'female'),
-('Adwin',  'Roberts',    7, 'male'),
-('Maya',   'Jones',      5, 'female'),
-('Sara',   'Jones',     36, 'female'),
-('Stella', 'Williams',   4, 'female');
-
-
--- inventory items
-INSERT INTO item (itemName, itemType, itemDescription)
-VALUES 
-  ('Worms','material','Small earthworms used for bait.'),
-  ('Violets','material','flower used to create paint dye.');
-
--- INSERT INTO userItem (idUser, idItem, quantity)
--- VALUES 
--- ((SELECT idUser from user where userName = "Gabe"),
--- (SELECT idItem from item where itemName = "Worms"),
--- 34),
--- ((SELECT idUser from user where userName = "Gabe"),
--- (SELECT idItem from item where itemName = "Violets"),
--- 7);
--- ----------------------------------------------------------
--- ADWIN initial bg info , relationships , and emotion
--- ----------------------------------------------------------
+('Adwin',  'Roberts',    7, 'male');
 
 
 INSERT INTO npc_persona (
@@ -563,380 +575,6 @@ VALUES (
   'You are Adwin Roberts. You love the arts, especially designing patterns and making clothes. You often create design patterns digitally and then order prints and fabric online. You also know how to sew. At the town’s annual bartering festival, you sell handmade clothing such as crocheted vests and quilted jackets. You are a six-year-old boy, so your mother helps you with the business.'
 );
 
- -- task for Adwin
-INSERT INTO tasks (taskName, taskDetails, idNPC)
-VALUES (
-  'Collect Flowers',
-  'Adwin needs help collecting flowers so he can create natural paint colors for a mural he is working on.',
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwin')
-);
-
-INSERT INTO tasks (taskName, taskDetails, idNPC)
-VALUES (
-  'Get Measurements',
-  'Adwin needs Maya’s measurements but is too busy with all the preparation for the bartering festival.',
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwin')
-);
-
--- Adwin NPC to NPC relationship with Maya (friendly)
-INSERT INTO npcNPCrelationship
-(idNPC_1, idNPC_2, idRelationshipType, relTypeIntensity, trust)
-VALUES
-(
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwin'),
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Maya'),
-  1,
-  0,
-  89
-);
-
--- Maya NPC to NPC relationship with Adwim (friendly) for symmetricl relationships 
-INSERT INTO npcNPCrelationship
-(idNPC_1, idNPC_2, idRelationshipType, relTypeIntensity, trust)
-VALUES
-(
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Maya'),
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwin'),
-  1,
-  0,
-  89
-);
-
--- set Adwin's emotion to happy
-INSERT INTO npcEmotion (idNPC, idEmotion, emotionIntensity)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwin'),
-  (SELECT idEmotion FROM emotion WHERE emotion = 'happy'),
-  0.85
-);
-
--- ------------------------
--- ADWIN'S PRECONDITIONS
--- ------------------------
-
--- When a new user is created or when Adwin enters the game world, initialize to false:
--- but what really would need to happen in code is to get all the NPCs ,
--- get all their preconditions, and set them for the current player 
--- when a world loads for the first time. 
-
-
-INSERT INTO precondition (idNPC, nameCondition, conditionDescription)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwin'),
-  'adwin_met',
-  'Player has met adwin and started an acquaintanceship.'
-);
-INSERT INTO user_precondition (idUser, idPrecondition)
-VALUES (
-  (SELECT idUser FROM user WHERE userName = 'Gabe'),
-  (SELECT idPrecondition FROM precondition WHERE nameCondition = 'adwin_met')
-);
-INSERT INTO precondition (idNPC, nameCondition, conditionDescription)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwin'),
-  'conflict_discovered',
-  'Player has learned about Adwin’s conflict.'
-);
-INSERT INTO user_precondition (idUser, idPrecondition)
-VALUES (
-  (SELECT idUser FROM user WHERE userName = 'Gabe'),
-  (SELECT idPrecondition FROM precondition WHERE nameCondition = 'conflict_discovered')
-);
-INSERT INTO precondition (idNPC, nameCondition, conditionDescription)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwin'),
-  'flowers_collected',
-  'Player has collected the required flowers.'
-);
-INSERT INTO user_precondition (idUser, idPrecondition)
-VALUES (
-  (SELECT idUser FROM user WHERE userName = 'Gabe'),
-  (SELECT idPrecondition FROM precondition WHERE nameCondition = 'flowers_collected')
-);
-
--- ------------------------
--- ADWIN'S STORYLETS
--- ------------------------
-
-
--- we can then use python to pull the data from his background table 
--- and have the LLM create the narration from there
-
--- storylet 1.  - precondition : be a stranger
-INSERT INTO storylet (idNPC, nameStorylet, contentStorylet)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwin'),
-  'adwin_intro',
-  'Adwin briefly introduces himself. In one short sentence, Adwin will share what he will be doing at the upcoming Bartering Festival. Adwin asks the player a related question in an attempt to form an acquaintanceship. If the player responds, Adwin will try to get the player to agree to go to the bartering festival.'
-);
-
--- storylet 2.  - precondition : have agreed to go to festival / have formed an acquaintanceship
-INSERT INTO storylet (idNPC, nameStorylet, contentStorylet)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwin'),
-  'adwin_dilema',
-  'Adwin realizes that he needs more paint for his designs for the upcoming festival. He needs a specific violet that can only be found by harvesting local flowers. He promised Maya that he would make her a piece of clothing in that color but forgot. Adwin is surprised and anxious right now and does not know what to do because he is so busy. Adwin hints that he might need your help.'
-);
-
--- storylet 3. precondition - have offered to help find flowers for adwin
-INSERT INTO storylet (idNPC, nameStorylet, contentStorylet)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwin'),
-  'adwin_find_flowers',
-  'Adwin has tasked you with finding flowers'
-);
-
--- storylet 4. precondition - have found flowers
-INSERT INTO storylet (idNPC, nameStorylet, contentStorylet)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwin'),
-  'adwin_flowers_found',
-  'You Give Adwin the flowers. He will thank you and says that he there is a costume competition at the Bartering Festival and if you ever need a custom costume to let him know. But before he can start designing, he needs your measurements and to know what costume you need and also just needs one more favor - ask Maya, his best friend, what her measurements are. You will learn Maya always hides away in some hidden fishing spot where apparently it is the best place to catch fish.'
-);
-
--- storylet 5. 
-INSERT INTO storylet (idNPC, nameStorylet, contentStorylet)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwin'),
-  'adwin_stressed',
-  'Adwin states that he is too busy and stressed to be able to make you your own costume for the festival at this time.'
-);
-
--- ------------------------
--- ADWIN'S STORYLET_PRECONDITIONS TABLE
--- ------------------------
-
-
--- adwin_dilema requires that you first meet adwin and have a positive interaction with him. 
-INSERT INTO storylet_preconditions (idPrecondition, idStorylet)
-VALUES (
-  (SELECT idPrecondition FROM precondition WHERE nameCondition = 'adwin_met'),
-  (SELECT idStorylet FROM storylet WHERE nameStorylet = 'adwin_dilema')
-);
-
--- adwin_find_flowers requires flowers_task_accepted
-INSERT INTO storylet_preconditions (idPrecondition, idStorylet)
-VALUES (
-  (SELECT idPrecondition FROM precondition WHERE nameCondition = 'conflict_discovered'),
-  (SELECT idStorylet FROM storylet WHERE nameStorylet = 'adwin_find_flowers')
-);
-
--- adwin_flowers_found requires flowers_collected
-INSERT INTO storylet_preconditions (idPrecondition, idStorylet)
-VALUES (
-  (SELECT idPrecondition FROM precondition WHERE nameCondition = 'flowers_collected'),
-  (SELECT idStorylet FROM storylet WHERE nameStorylet = 'adwin_flowers_found')
-);
-
-
--- ------------------------
--- ADWIN'S CHOICES
--- ------------------------
-
--- choices for storylet 1. - player responds by saying something related to what Adwin just said in his introduction. this will lead to player and Adwin becoming acquaintances. 
-INSERT INTO choice (idSourceStorylet, choiceText)
-VALUES (
-  (SELECT idStorylet FROM storylet WHERE nameStorylet = 'adwin_intro'),
-  'Agree to go to the bartering festival'
-);
-
--- choices for storylet 2 - 
--- a - do nothing
-INSERT INTO choice (idSourceStorylet, choiceText)
-VALUES (
-  (SELECT idStorylet FROM storylet WHERE nameStorylet = 'adwin_dilema'),
-  'Do not offer Adwin help or ask Adwin for anything. Simply Wish Adwin luck in his endeavors.'
-);
--- b - offer to find flowers
--- this would also add finding flowers to the user's tasks
--- this would also set the precondition 'flowers_task_accepted' to true.
--- this would increase trust in your current relationship setting of acquaintance
-INSERT INTO choice (idSourceStorylet, choiceText)
-VALUES (
-  (SELECT idStorylet FROM storylet WHERE nameStorylet = 'adwin_dilema'),
-  'Offer to find flowers for Adwin.'
-);
--- c - ask for a costume
--- this would result in relationship status changing from acquaintance to also include enemy ?
-INSERT INTO choice (idSourceStorylet, choiceText)
-VALUES (
-  (SELECT idStorylet FROM storylet WHERE nameStorylet = 'adwin_dilema'),
-  'You ask Adwin to make a costume for you.'
-);
-
--- ------------------------
--- ADWIN'S TASKS
--- ------------------------
-
-INSERT INTO tasks (taskName, taskDetails, idNPC)
-VALUES (
-  'find_flowers',
-  'Collect the flowers Adwin needs to create violet paint for his festival designs.',
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwin')
-);
-
-
--- insert into storylet_precondition tables now ?
-
--- then find currentStorylet (intial storylet for user) from where a storylet matches any of the user's precondition?
-
-
--- ----------------------------------------------------------
--- MAYA
--- ----------------------------------------------------------
-
--- set Maya's emotion to angry
-INSERT INTO npcEmotion (idNPC, idEmotion, emotionIntensity)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Maya'),
-  (SELECT idEmotion FROM emotion WHERE emotion = 'angry'),
-  0.50
-);
-
-INSERT INTO npc_persona (
-  idNPC,
-  role,
-  personality_traits,
-  emotional_tendencies,
-  speech_style,
-  moral_alignment
-)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Maya'),
-  'Young fisher-in-training',
-  'Stubborn, determined, proud, easily frustrated, loyal to family',
-  'Becomes irritable when failing repeatedly; softens when helped; motivated by family obligations',
-  'Speaks bluntly and directly; short responses when annoyed; warmer tone when discussing family',
-  'Strong sense of duty; values effort and honesty; dislikes laziness'
-);
-
--- background info for Maya
-INSERT INTO background (idNPC, BGcontent)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Maya'),
-  'Maya’s parents are fishermen. Maya’s parents own a seafood stand and store. Maya’s bestfriend is Adwin. Maya is frustrated because she cannot catch the fish she needs for her mother’s birthday party.'
-);
-
-INSERT INTO tasks (taskName, taskDetails, idNPC)
-VALUES (
-  'Get bait',
-  'Maya needs bait to continue fishing to catch her mother’s favorite fish for her mother’s upcoming birthday.',
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Maya')
-);
-
--- Maya NPC to NPC relationship with Sara (family) for symmetricl relationships 
-INSERT INTO npcNPCrelationship
-(idNPC_1, idNPC_2, idRelationshipType, relTypeIntensity, trust)
-VALUES
-(
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Maya'),
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Sara'),
-  5,
-  0,
-  95
-);
-
--- ----------------------------------------------------------
--- Stella
--- ----------------------------------------------------------
-
-
-INSERT INTO npc_persona (
-  idNPC,
-  role,
-  personality_traits,
-  emotional_tendencies,
-  speech_style,
-  moral_alignment
-)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Stella'),
-  'Festival costume champion',
-  'Confident, competitive, playful, charismatic, slightly boastful',
-  'Thrives on admiration; becomes defensive when challenged; enjoys friendly rivalry',
-  'Expressive and theatrical; playful teasing; confident phrasing',
-  'Self-assured but fair; values creativity and mutual respect'
-);
-
--- set Maya's emotion to happy
-INSERT INTO npcEmotion (idNPC, idEmotion, emotionIntensity)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Maya'),
-  (SELECT idEmotion FROM emotion WHERE emotion = 'happy'),
-  0.80
-);
-
--- background info for Stella
-INSERT INTO background (idNPC, BGcontent)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Stella'),
-  'Stella has won the best costume for the past couple of years at the Bartering festival’s costume competition. This year she partnering with the player to do a duos costume. Stella will be dressed as a fishing hook with a worm attached'
-);
-
--- player to NPC relationship with Stella (friend)
-INSERT INTO playerNPCrelationship
-(idUser, idNPC, idRelationshipType, relTypeIntensity, trust)
-VALUES
-(
-  (SELECT idUser FROM user WHERE nameFirst = 'Lisa'),
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Stella'),
-  1,
-  0,
-  85
-);
-
--- ----------------------------------------------------------
--- Sara Jones
--- ------------------------------------------------------------ 
-
--- set Maya's emotion to calm
-INSERT INTO npcEmotion (idNPC, idEmotion, emotionIntensity)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Sara'),
-  (SELECT idEmotion FROM emotion WHERE emotion = 'calm'),
-  0.80
-);
-
--- background info for Sara
-INSERT INTO background (idNPC, BGcontent)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Sara'),
-  'Sarah Jones has a family. She and her husband own the seafood store in town. She and her husband have a daughter, Maya. They are a family of fishermen so they sell the seafood that they catch and you can get fishing bait here. She has a hobby of knitting her daughter Maya’s socks."'
-);
-
--- Sara NPC to NPC relationship with Sara (family) for symmetricl relationships 
-INSERT INTO npcNPCrelationship
-(idNPC_1, idNPC_2, idRelationshipType, relTypeIntensity, trust)
-VALUES
-(
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Sara'),
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Maya'),
-  5,
-  0,
-  95
-);
-
-
--- test tasks UI
-
--- INSERT INTO user_task (idUser, idTask, status)
--- VALUES (
---   1,
---   (SELECT idTask
---    FROM tasks
---    WHERE taskName = 'find_flowers'
---      AND idNPC = (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwin')),
---   'active'
--- );
-
--- INSERT INTO user_task (idUser, idTask, status)
--- VALUES (
---   1,
---   (SELECT idTask
---    FROM tasks
---    WHERE taskName = 'Get bait'
---      AND idNPC = (SELECT idNPC FROM NPC WHERE nameFirst = 'Maya')),
---   'active'
--- );
-
-
+SET SQL_MODE=@OLD_SQL_MODE;
+SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;
+SET UNIQUE_CHECKS=@OLD_UNIQUE_CHECKS;

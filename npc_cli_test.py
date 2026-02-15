@@ -43,10 +43,7 @@ def on_audio_drain():
 idUser = 1
 idNPC = 2
 currentScene = """
-Adwin briefly introduces himself. In one short sentence,
-Adwin will share what he will be doing at the upcoming Bartering Festival.
-Adwin asks the player a related question in an attempt to form an acquaintanceship.
-If the player responds, Adwin will try to get the player to agree to go to the bartering festival.
+    Adwin is looking for a place to sit at lunch at his new school. 
 """
 playerName = "Gabriel"
 voiceId = "SOYHLrjzK2X1ezoPC6cr"
@@ -58,7 +55,7 @@ sio = socketio.Client()
 
 @sio.event
 def connect():
-    print("🔌 Connected to socket server")
+    print("\n🔌 Connected to socket server\n")
     sio.emit("register_user", {"idUser": idUser})
 
 # ---- AUDIO (transport only)
@@ -77,7 +74,7 @@ def on_audio_done(_data=None):
         if player is None:
             return
 
-        print("📦 Server finished sending audio")
+        print("\n📦 Server finished sending audio\n")
         player.feed(None)
 
 # ---- TEXT
@@ -92,12 +89,8 @@ def on_text_done(_data=None):
 # ---- STATE
 @sio.on("npc_state_update")
 def on_npc_state(data):
-    print(f"\n[DEBUG] NPC {data['idNPC']}")
-    print(f"Trust: {data['trust']}")
-    print("Emotions:")
-    for emo in data["emotions"]:
-        print(f"  - {emo['emotion']}: {emo['emotionIntensity']:.2f}")
-    print()
+    pass
+   
 
 # ---- TURN CONTROL (speech START only)
 @sio.on("npc_speaking")
@@ -150,7 +143,8 @@ while True:
         # user_text = speech_to_text(wav_path)
         # print("STT:", user_text)
 
-        user_text = input("Say something...  ")
+        user_text = input("\nSay something...  ")
+        print()
     
 
         payload = {
