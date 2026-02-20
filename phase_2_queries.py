@@ -1,4 +1,4 @@
-from flask import request, jsonify
+from flask import jsonify
 import os
 import mysql.connector
 from datetime import datetime, timezone
@@ -118,6 +118,58 @@ def build_prompt(idNPC: int, idUser: int) -> str:
             relationship = cursor.fetchone()
 
         # --------------------------------------------------
+        # Self beliefs (about self)
+        # --------------------------------------------------
+        cursor.execute("""
+            SELECT beliefType, beliefValue, confidence
+            FROM npc_self_belief
+            WHERE idNPC = %s
+            AND confidence >= 0.6
+            ORDER BY beliefType, confidence DESC
+        """, (idNPC,))
+
+        self_beliefs = cursor.fetchall()
+
+        self_summary = {}
+
+        for b in self_beliefs:
+            self_summary.setdefault(b["beliefType"], [])
+            if len(self_summary[b["beliefType"]]) <= 10:
+                self_summary[b["beliefType"]].append(b["beliefValue"])
+
+        if self_summary:
+            prompt += "\n\nNPC'S CURRENT SELF-BELIEFS\n"
+            prompt += "--------------------------\n"
+
+            for btype, values in self_summary.items():
+                prompt += f"{btype.replace('_',' ').title()}:\n"
+                for v in values:
+                    prompt += f"- {v}\n"
+
+        prompt += """
+
+        SELF-IDENTITY INFLUENCE RULE
+        ----------------------------
+        The above self-beliefs represent how you currently understand yourself.
+
+        They strongly influence:
+
+        - Your confidence or hesitation
+        - Your tone when discussing certain topics
+        - Your emotional reactions
+        - Your willingness to assert or withdraw
+        - Your sense of identity and role in the world
+
+        If a high-confidence self-belief is relevant to the current moment,
+        your speech should reflect it naturally.
+
+        If a self-belief conflicts with your persona seed,
+        your tone may show internal tension.
+
+        Do not ignore high-confidence self-beliefs when they are contextually relevant.
+        """
+
+        # --------------------------------------------------
         # beliefs about player
         # --------------------------------------------------
         cursor.execute("""
@@ -211,8 +263,7 @@ def build_prompt(idNPC: int, idUser: int) -> str:
             prompt += f"""
             CURIOSITY PRIORITY
             ------------------
-            Understanding the player is one of your ongoing goals.
-
+     
             If there are major gaps in your understanding of the player,
             and the current emotional situation allows it,
             you may choose to make your conversational beat a question.
@@ -377,7 +428,7 @@ def build_prompt(idNPC: int, idUser: int) -> str:
         -------------------------
         Each response is a single conversational turn.
 
-        - 1–2 sentences maximum
+        - 1–3 sentences maximum
         - 8–60 words total
         - Express only one conversational beat.
             A beat may be:
@@ -788,7 +839,8 @@ def update_npc_user_beliefs(idNPC, idUser, persona_data):
 
         if not value:
             return
-
+        # Do we already have THIS exact belief (same type + same value)
+        # for this NPC about this user?”
         cursor.execute("""
             SELECT confidence
             FROM npc_user_belief
@@ -802,6 +854,7 @@ def update_npc_user_beliefs(idNPC, idUser, persona_data):
             old_conf = row["confidence"]
 
             # Reinforcement formula (better than +0.1)
+            # weaker beliefs get stronger reinforcement vs stronger beliefs
             new_conf = min(1.0, old_conf + (1 - old_conf) * incoming_conf)
 
             cursor.execute("""
@@ -817,6 +870,8 @@ def update_npc_user_beliefs(idNPC, idUser, persona_data):
             ))
 
         else:
+            # A brand new belief starts at exactly whatever 
+            # confidence the model gave it.
             cursor.execute("""
                 INSERT INTO npc_user_belief
                 (idNPC, idUser, beliefType, beliefValue,
@@ -847,6 +902,8 @@ def update_npc_user_beliefs(idNPC, idUser, persona_data):
     # SINGLE VALUE FIELDS
     # -----------------------------
 
+    # Expected shape: {"value": ..., "confidence": ...}
+
     single_fields = [
         ("current_emotion", persona_data.get("current_emotion")),
         ("moral_alignment", persona_data.get("moral_alignment")),
@@ -865,6 +922,12 @@ def update_npc_user_beliefs(idNPC, idUser, persona_data):
     # -----------------------------
     # LIST FIELDS
     # -----------------------------
+
+    # e.g.
+    # persona_data = {
+    # "personality_traits": [
+    #     {"value": "brave", "confidence": 0.8},
+    #     {"value": "impulsive", "confidence": 0.6}
 
     list_fields = {
         "personality_trait": persona_data.get("personality_traits", []),
@@ -1001,6 +1064,29 @@ def emit_npc_state(idUser, idNPC, socketio):
                 })
 
         # -----------------------------------
+        # SELF BELIEFS (NPC about itself)
+        # -----------------------------------
+        cursor.execute("""
+            SELECT beliefType, beliefValue, confidence, stability
+            FROM npc_self_belief
+            WHERE idNPC=%s
+            ORDER BY beliefType, confidence DESC
+        """, (idNPC,))
+
+        self_rows = cursor.fetchall()
+
+        self_belief_debug = {}
+        for row in self_rows:
+            btype = row["beliefType"]
+            self_belief_debug.setdefault(btype, [])
+            if len(self_belief_debug[btype]) < 100:
+                self_belief_debug[btype].append({
+                    "value": row["beliefValue"],
+                    "confidence": round(row["confidence"], 2),
+                    "stability": round(row["stability"], 2)
+                })
+
+        # -----------------------------------
         # RESEARCH METRICS (Player → NPC history)
         # -----------------------------------
 
@@ -1043,7 +1129,7 @@ def emit_npc_state(idUser, idNPC, socketio):
                 float(offensive_row["offensive_count"]) /
                 float(offensive_row["total"]),
                 3
-    )
+            )
 
         # Emotion distribution
         cursor.execute("""
@@ -1094,11 +1180,11 @@ def emit_npc_state(idUser, idNPC, socketio):
                 for e in emotions
             ],
 
+            # Beliefs about player
             "beliefs": belief_debug,
 
-            # -----------------------------------
-            # RESEARCH DATA
-            # -----------------------------------
+            "selfBeliefs": self_belief_debug,
+
             "research": {
                 "sentimentDistribution": sentiment_dist,
                 "averageIntensity": round(avg_intensity, 3),
@@ -1107,21 +1193,6 @@ def emit_npc_state(idUser, idNPC, socketio):
                 "targetDistribution": target_dist
             }
         }
-        # -----------------------------------
-        # Backend debug print 
-        # -----------------------------------
-        # print("\n[DEBUG] NPC", idNPC)
-        # print("Relationship:", rel_label)
-        # print("Trust:", trust)
-
-        # print("Emotions:")
-        # for e in emotions:
-        #     print(f"  - {e['emotion']}: {round(e['emotionIntensity'], 2)}")
-
-        # print("Beliefs about player:")
-        # for k, v in belief_debug.items():
-        #     print(f"  {k}: {v}")
-
         # -----------------------------------
         # SOCKET EMIT
         # -----------------------------------
@@ -1133,8 +1204,6 @@ def emit_npc_state(idUser, idNPC, socketio):
     finally:
         cursor.close()
         db.close()
-#------------------------------------------------------------------
-
 # ------------------------------------------------------------------
 def build_dialogue_memory_summary(raw_mem: str, max_entries: int = 20):
     """

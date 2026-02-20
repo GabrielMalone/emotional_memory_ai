@@ -112,7 +112,7 @@ def npc_interact():
         # classify player input
         # ----------------------------------------------------------
         raw_mem = get_mem(idNPC=idNPC, idUser=idUser)
-        # cls_mem = openAIqueries.build_classification_context(raw_mem, 6)
+        cls_mem = openAIqueries.build_classification_context(raw_mem, 6)
 
         classification = openAIqueries.classify_player_input(
             data["playerText"], raw_mem, client, idNPC, idUser
@@ -149,7 +149,7 @@ def npc_interact():
 
         beliefs = openAIqueries.extract_persona_clues(
             player_text=pText,
-            recent_context=raw_mem,
+            recent_context=cls_mem,
             client=client,
             idNPC=idNPC,
             idUser=idUser
@@ -276,6 +276,14 @@ def npc_interact():
         intensity = min(1.0, base_intensity * reactivity)
 
         set_npc_emotion(idNPC, emotion_name, intensity)
+
+        updated_mem = get_mem(idNPC=idNPC, idUser=idUser)
+        classification = openAIqueries.classify_player_input(
+            data["playerText"], updated_mem, client, idNPC, idUser
+        )
+
+        self_beliefs = openAIqueries.extract_self_beliefs(text, classification, client, idNPC)
+        openAIqueries.merge_self_beliefs(idNPC, self_beliefs["beliefs"])
   
 
         # ----------------------------------------------------------

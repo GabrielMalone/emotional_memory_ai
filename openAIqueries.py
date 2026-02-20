@@ -97,15 +97,39 @@ def classify_player_input(player_text: str, raw_mem: str, client, idNPC: int, id
 
     beliefs = cursor.fetchall()
 
-    cursor.close()
-    db.close()
-
     # Format beliefs
     belief_text = ""
     if beliefs:
         belief_text += "\nCurrent beliefs about the player:\n"
         for b in beliefs:
             belief_text += f"- {b['beliefType']}: {b['beliefValue']} (confidence {round(b['confidence'],2)})\n"
+
+
+    # -----------------------------------
+    # SELF BELIEFS (NPC about itself)
+    # -----------------------------------
+    cursor.execute("""
+        SELECT beliefType, beliefValue, confidence
+        FROM npc_self_belief
+        WHERE idNPC=%s
+        AND confidence >= 0.3
+        ORDER BY beliefType, confidence DESC
+    """, (idNPC,))
+
+    self_beliefs = cursor.fetchall()
+
+    self_belief_text = ""
+    if self_beliefs:
+        self_belief_text += "\nCore beliefs about self:\n"
+        for b in self_beliefs:
+            self_belief_text += (
+                f"- {b['beliefType']}: "
+                f"{b['beliefValue']} "
+                f"(confidence {round(b['confidence'],2)})\n"
+        )
+            
+    cursor.close()
+    db.close()
 
     # -----------------------------------
     # SYSTEM MESSAGE
@@ -126,6 +150,7 @@ def classify_player_input(player_text: str, raw_mem: str, client, idNPC: int, id
     - Personality biases perception.
     - Existing beliefs influence emotional reading.
     {belief_text}
+    {self_belief_text}
 
     Return ONLY valid JSON.
     Do not explain.
@@ -266,6 +291,26 @@ def extract_persona_clues(player_text: str, recent_context: dict, client, idNPC,
 
     existing_beliefs = cursor.fetchall()
 
+    # Existing beliefs about self
+    cursor.execute("""
+        SELECT beliefType, beliefValue, confidence
+        FROM npc_self_belief
+        WHERE idNPC=%s
+        AND confidence >= 0.3
+        ORDER BY beliefType, confidence DESC
+    """, (idNPC,))
+
+    self_beliefs = cursor.fetchall()
+
+    if self_beliefs:
+        system += "\nCore beliefs about self:\n"
+        for row in self_beliefs:
+            system += (
+                f"- {row['beliefType']}: "
+                f"{row['beliefValue']} "
+                f"(confidence {round(row['confidence'],2)})\n"
+            )
+
     belief_summary = {}
     for row in existing_beliefs:
         belief_summary.setdefault(row["beliefType"], [])
@@ -389,8 +434,15 @@ def extract_persona_clues(player_text: str, recent_context: dict, client, idNPC,
     - dislikes should reflect aversions, discomfort, or negative recurring themes.
     - Do not infer likes/dislikes from a single neutral statement.
     - Preferences should feel semi-stable, not momentary.
+    - beliefValue must represent a SINGLE normalized trait or fact.
+    - Do NOT include explanations or compound sentences.
+    - Do NOT restate background context.
+    - Avoid semantic duplicates of existing beliefs.
+    - If a belief already exists in similar form, reinforce it instead of rephrasing it.
+    - Prefer short canonical labels (e.g., figure_drawing_model, teacher_at_st_marcus).
     - Do NOT guess randomly.
     - No extra keys.
+    
     """
 
     resp = client.chat.completions.create(
@@ -447,9 +499,318 @@ def extract_persona_clues(player_text: str, recent_context: dict, client, idNPC,
     for key in expected_lists:
         result[key] = normalize_list_field(result.get(key))
 
+    seen = set()
+    deduped = []
+
+    for belief in result["personality_traits"]:
+        canon = canonicalize(belief["value"])
+        if canon not in seen:
+            belief["value"] = canon
+            deduped.append(belief)
+            seen.add(canon)
+
+    result["personality_traits"] = deduped
+
     return result
 
 #------------------------------------------------------------------
+def canonicalize(value: str) -> str:
+    return (
+        value.lower()
+        .replace("has experience being a ", "")
+        .replace("has experience as a ", "")
+        .replace("is comfortable with ", "")
+        .replace("likely has ", "")
+        .replace("has lived in this town their whole life", "local_resident")
+        .strip()
+    )
+
+#------------------------------------------------------------------
+def extract_self_beliefs(npc_output: str, recent_context: dict, client, idNPC: int):
+
+    db = connect()
+    cursor = db.cursor(dictionary=True)
+
+    # ----------------------------------------
+    # Core NPC profile (stable identity seed)
+    # ----------------------------------------
+    cursor.execute("""
+        SELECT n.age, n.gender,
+               p.role,
+               p.personality_traits,
+               p.emotional_tendencies,
+               p.moral_alignment
+        FROM NPC n
+        LEFT JOIN npc_persona p ON p.idNPC = n.idNPC
+        WHERE n.idNPC = %s
+    """, (idNPC,))
+    npc = cursor.fetchone()
+
+    # ----------------------------------------
+    # Current dominant emotion
+    # ----------------------------------------
+    cursor.execute("""
+        SELECT e.emotion
+        FROM npcEmotion ne
+        JOIN emotion e ON e.idEmotion = ne.idEmotion
+        WHERE ne.idNPC = %s
+        ORDER BY ne.emotionIntensity DESC
+        LIMIT 1
+    """, (idNPC,))
+    emotion_row = cursor.fetchone()
+    npc_emotion = emotion_row["emotion"] if emotion_row else None
+
+    # ----------------------------------------
+    # Existing self beliefs
+    # ----------------------------------------
+    cursor.execute("""
+        SELECT beliefType, beliefValue, confidence, stability
+        FROM npc_self_belief
+        WHERE idNPC = %s
+    """, (idNPC,))
+    existing = cursor.fetchall()
+
+    cursor.close()
+    db.close()
+
+    belief_summary = ""
+    if existing:
+        belief_summary += "\nCurrent self-beliefs:\n"
+        for row in existing:
+            belief_summary += (
+                f"- {row['beliefType']}: {row['beliefValue']} "
+                f"(confidence {round(row['confidence'],2)}, "
+                f"stability {round(row['stability'],2)})\n"
+            )
+
+    # ----------------------------------------
+    # SYSTEM PROMPT
+    # ----------------------------------------
+    system = f"""
+        You are simulating how THIS NPC forms beliefs about itself.
+
+        The NPC may form or revise beliefs in the following domains ONLY:
+
+        - age
+        - gender
+        - race
+        - physical_appearance
+        - identity
+        - role
+        - life_history
+        - likes
+        - dislikes
+        - moral_alignment
+        - personality_trait
+        - goal
+        - fear
+        - worldview
+        - current_environment
+        - environment_social
+        - environment_physical
+        - current_state
+        - physical_condition
+
+        Do NOT invent other belief types.
+
+        NPC PROFILE
+        -----------
+        Age: {npc['age']}
+        Gender: {npc['gender']}
+        Role: {npc['role']}
+        Personality traits: {npc['personality_traits']}
+        Emotional tendencies: {npc['emotional_tendencies']}
+        Moral alignment: {npc['moral_alignment']}
+        Current dominant emotion: {npc_emotion}
+
+        {belief_summary}
+
+        Belief Revision Rules:
+        ----------------------
+        - Only revise domains clearly supported by the NPC's own words.
+        - Do not output beliefs for domains not referenced or implied.
+        - High confidence (0.9+) requires explicit self-reference.
+        - Stability should be HIGH (0.8+) when reinforcing core identity domains.
+        - Stability should be LOW (0.2–0.5) for temporary states, doubts, or situational conditions.
+        - If a core identity trait is being questioned, stability may decrease but should not collapse without explicit self-contradiction.
+        - Do NOT hallucinate major backstory.
+        - Do NOT act as an omniscient narrator.
+        - Return ONLY valid JSON.
+        - Age, gender, and race are immutable unless explicitly corrected by the NPC.
+        - Do not weaken or contradict immutable traits without explicit self-correction.
+
+        - environment_physical = physical setting (location, weather, room, city).
+        - environment_social = people present, group dynamics, social hierarchy.
+        - current_environment = general situational state if unclear.
+
+        Core Identity Domains:
+        ----------------------
+        The following belief types are considered CORE identity traits:
+
+        - age
+        - gender
+        - race
+        - identity
+        - role
+        - moral_alignment
+        - personality_trait
+        - worldview
+
+        These represent enduring aspects of self-concept.
+
+        All other domains (current_state, environment_*, physical_condition, temporary fears, etc.)
+        are considered situational or dynamic.
+
+        """
+
+    if recent_context and "recent_summary" in recent_context:
+        system += f"\nRecent interaction summary:\n{recent_context['recent_summary']}\n"
+
+    user = f"""
+        NPC spoken text:
+        \"\"\"{npc_output}\"\"\"
+
+        Evaluate whether the NPC is expressing, reinforcing, weakening, or questioning beliefs about:
+
+        - Age
+        - Gender
+        - Race
+        - Physical appearance
+        - Likes / Dislikes
+        - Life history
+        - Current environment (social or physical)
+        - Identity or role
+        - Personality traits
+        - Goals or fears
+
+        Return JSON in this exact format:
+
+        {{
+        "beliefs": [
+            {{
+            "beliefType": string,
+            "beliefValue": string,
+            "confidence": float,
+            "stability": float
+            }}
+        ]
+        }}
+
+        Rules:
+        - Only include domains clearly supported by the NPC's words.
+        - Do NOT fabricate race or physical traits unless explicitly mentioned.
+        - Do NOT guess immutable traits randomly.
+        - Confidence between 0.0 and 1.0.
+        - Stability between 0.0 and 1.0.
+        - Below 0.3 confidence → omit.
+        - No extra keys.
+        - beliefValue must be concise and normalized (snake_case, no long sentences).
+        """
+
+    resp = client.chat.completions.create(
+        model="gpt-4.1",
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=0.0,
+    )
+
+    # ----------------------------------------
+    # Safe JSON parsing
+    # ----------------------------------------
+
+    try:
+        result = json.loads(resp.choices[0].message.content)
+    except Exception:
+        return {"beliefs": []}
+    
+    ALLOWED_SELF_TYPES = {
+        "age",
+        "gender",
+        "race",
+        "physical_appearance",
+        "identity",
+        "role",
+        "life_history",
+        "likes",
+        "dislikes",
+        "moral_alignment",
+        "personality_trait",
+        "goal",
+        "fear",
+        "worldview",
+        "current_environment",
+        "environment_social",
+        "environment_physical",
+        "current_state",
+        "physical_condition"
+    }
+
+    # normalization
+    beliefs = result.get("beliefs", [])
+    cleaned = []
+
+    for b in beliefs:
+        if (
+            isinstance(b, dict)
+            and b.get("beliefType") in ALLOWED_SELF_TYPES
+            and "beliefValue" in b
+            and "confidence" in b
+            and "stability" in b
+        ):
+            cleaned.append({
+                "beliefType": str(b["beliefType"])[:50],
+                "beliefValue": str(b["beliefValue"])[:255],
+                "confidence": max(0.0, min(1.0, float(b["confidence"]))),
+                "stability": max(0.0, min(1.0, float(b["stability"])))
+            })
+
+    print(f"\nBELIEFS ABOUT SELF: {cleaned}\n")
+
+    return {"beliefs": cleaned}
+#------------------------------------------------------------------
+def merge_self_beliefs(idNPC, new_beliefs):
+    db = connect()
+    cursor = db.cursor(dictionary=True)
+
+    for belief in new_beliefs:
+        btype = belief["beliefType"]
+        bvalue = belief["beliefValue"]
+        new_conf = belief["confidence"]
+        new_stability = belief["stability"]
+
+        cursor.execute("""
+            SELECT confidence, stability
+            FROM npc_self_belief
+            WHERE idNPC=%s AND beliefType=%s AND beliefValue=%s
+        """, (idNPC, btype, bvalue))
+
+        existing = cursor.fetchone()
+
+        if existing:
+            old_conf = existing["confidence"]
+            stability = existing["stability"]
+
+            updated_conf = old_conf + (new_conf - old_conf) * (1 - stability)
+
+            cursor.execute("""
+                UPDATE npc_self_belief
+                SET confidence=%s, updatedAt=NOW()
+                WHERE idNPC=%s AND beliefType=%s AND beliefValue=%s
+            """, (updated_conf, idNPC, btype, bvalue))
+        else:
+            cursor.execute("""
+                INSERT INTO npc_self_belief
+                (idNPC, beliefType, beliefValue, confidence, stability)
+                VALUES (%s,%s,%s,%s,%s)
+            """, (idNPC, btype, bvalue, new_conf, new_stability))
+
+    db.commit()
+    cursor.close()
+    db.close()
+#------------------------------------------------------------------
+# for logging
 def record_classification_stats(idUser, idNPC, player_text, result):
     # -----------------------------------
     # RESEARCH LOG INSERT
@@ -670,7 +1031,7 @@ def classify_npc_reaction(player_text, npc_output, idNPC, idUser, client):
         "emotion": emotion,
         "intensity": intensity
     }
-
+#------------------------------------------------------------------
 def normalize_object_field(obj):
     if not isinstance(obj, dict):
         return None

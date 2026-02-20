@@ -547,6 +547,38 @@ CREATE TABLE player_input_classification_log (
     INDEX idx_npc (idNPC),
     INDEX idx_created (createdAt)
 );
+
+CREATE TABLE npc_self_belief (
+  idNPC INT NOT NULL,
+
+  beliefType VARCHAR(50) NOT NULL,
+  beliefValue VARCHAR(255) NOT NULL,
+
+  beliefSource VARCHAR(50) DEFAULT 'dialogue',
+
+  confidence FLOAT NOT NULL DEFAULT 0.5,
+  stability FLOAT NOT NULL DEFAULT 0.7,
+
+  evidence TEXT NULL,
+
+  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updatedAt DATETIME NOT NULL
+    DEFAULT CURRENT_TIMESTAMP
+    ON UPDATE CURRENT_TIMESTAMP,
+
+  PRIMARY KEY (idNPC, beliefType, beliefValue),
+
+  INDEX idx_npc_lookup (idNPC),
+  INDEX idx_confidence (idNPC, confidence),
+
+  CONSTRAINT fk_self_belief_npc
+    FOREIGN KEY (idNPC)
+    REFERENCES NPC(idNPC)
+    ON DELETE CASCADE
+);
+
+
+
 -- -----------------------------------------------------
 -- Seed data
 -- -----------------------------------------------------
@@ -575,7 +607,9 @@ INSERT INTO NPC
 (nameFirst, nameLast, age, gender)
 VALUES
 ('Emory',  NULL,        24, 'female'),
-('Adwina',  'Roberts',    37, 'female');
+('Elara', 'Virelli', 42, 'female'),
+('Adwina',  'Roberts',    30, 'female');
+
 
 
 INSERT INTO npc_persona (
@@ -589,11 +623,11 @@ INSERT INTO npc_persona (
 )
 VALUES (
   (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwina'),
-  'Artist, Actress, Athlete, religious, follows the law strictly',
+  'Artist, Actor, Athlete, religious, follows the law strictly',
   'Creative, shy, earnest, enthusiastic, sensitive, easily overwhelmed, kind-hearted',
   'Responds strongly to encouragement and praise; becomes anxious when rushed or confronted; avoids conflict and seeks help when stressed',
   1.25,
-  'asks curious questions; sounds nervous when overwhelmed',
+  'sounds nervous when overwhelmed',
   'Well-meaning and cooperative, but may have ulterior motives.'
 );
 
@@ -601,7 +635,27 @@ VALUES (
 INSERT INTO background (idNPC, BGcontent)
 VALUES (
   (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwina'),
-  'You are Adwina Roberts.  You love the arts, and working out, competing in athletics.'
+  'You are Adwina Roberts. You love the arts, working out, and competing in athletics.'
+);
+
+
+INSERT INTO npc_persona (
+  idNPC,
+  role,
+  personality_traits,
+  emotional_tendencies,
+  emotion_reactivity,
+  speech_style,
+  moral_alignment
+)
+VALUES (
+  (SELECT idNPC FROM NPC WHERE nameFirst = 'Elara'),
+  'University ethics professor, former investigative journalist',
+  'Intelligent, perceptive, composed, dry-witted, guarded, principled, quietly competitive',
+  'Slow to anger but intensely reactive to hypocrisy or betrayal; becomes emotionally distant under stress; softens when intellectually respected',
+  1.15,
+  'Measured and articulate; voice tightens slightly when irritated; uses subtle irony rather than overt sarcasm',
+  'Deeply values justice and integrity, but carries guilt about a past compromise.'
 );
 
 
