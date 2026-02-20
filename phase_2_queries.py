@@ -2,6 +2,7 @@ from flask import request, jsonify
 import os
 import mysql.connector
 from datetime import datetime, timezone
+import ast
 #------------------------------------------------------------------
 def connect()->object:
     return mysql.connector.connect(
@@ -12,6 +13,7 @@ def connect()->object:
 #------------------------------------------------------------------
 def build_prompt(idNPC: int, idUser: int) -> str:
     prompt = ""
+
     db = connect()
     if not db.is_connected():
         raise RuntimeError("DB not connected")
@@ -131,7 +133,7 @@ def build_prompt(idNPC: int, idUser: int) -> str:
         # get top 3 beliefs for each belief 
         for b in beliefs:
             belief_summary.setdefault(b["beliefType"], [])
-            if len(belief_summary[b["beliefType"]]) < 3:
+            if len(belief_summary[b["beliefType"]]) <= 10:
                 belief_summary[b["beliefType"]].append(b["beliefValue"])
 
         if belief_summary:
@@ -143,14 +145,15 @@ def build_prompt(idNPC: int, idUser: int) -> str:
                 for v in values:
                     prompt += f"- {v}\n"
 
+        print(f"\nBELIEFS IN PROMPT: {prompt}\n")
+
         prompt += """
 
         BELIEF INTERPRETATION RULE
         --------------------------
         The above beliefs are your current working model of the player.
 
-        You do not treat them as objective truth —
-        but they strongly influence:
+        they strongly influence:
 
         - Your tone
         - Your level of warmth or suspicion
@@ -167,6 +170,26 @@ def build_prompt(idNPC: int, idUser: int) -> str:
         You respond to the player as you currently perceive them.
         """
 
+        prompt += """
+
+        BELIEF REINFORCEMENT PRIORITY
+        -----------------------------
+        If the player's statement directly references
+        a known high-confidence belief (≥ 0.3),
+
+        you should usually:
+
+        - Acknowledge or reinforce that belief first
+        - Reflect familiarity or continuity
+        - Show recognition of the pattern
+
+        Curiosity should not override reinforcement
+        unless the emotional context strongly demands it.
+
+        Do not ignore strong existing beliefs
+        when they are directly relevant to what the player just said.
+        """
+
         all_belief_types = {
         "current_emotion",
         "moral_alignment",
@@ -174,7 +197,9 @@ def build_prompt(idNPC: int, idUser: int) -> str:
         "gender",
         "personality_trait",
         "secret",
-        "goal"
+        "goal",
+        "likes",
+        "dislikes"
         }
 
         known_types = set(belief_summary.keys())
@@ -192,8 +217,8 @@ def build_prompt(idNPC: int, idUser: int) -> str:
             and the current emotional situation allows it,
             you may choose to make your conversational beat a question.
 
-            Curiosity is not secondary to reaction.
-            It is a legitimate driver of speech.
+            Curiosity may drive speech when it feels natural,
+            but it should not override strong emotional or relational continuity.
 
             When:
             - trust ≥ 40
@@ -218,9 +243,8 @@ def build_prompt(idNPC: int, idUser: int) -> str:
             FROM npc_user_memory
             WHERE idNPC = %s AND idUser = %s;
         """, (idNPC, idUser))
-        memory = cursor.fetchone()
 
-        # print(f"\nNPC MEMORY:\n", memory)
+        memory = cursor.fetchone()
 
         interaction_context = None
 
@@ -309,14 +333,30 @@ def build_prompt(idNPC: int, idUser: int) -> str:
         - same_day: familiar tone, no introduction
         - long_gap: acknowledge time passing before speaking
         """
+            
+        
 
         if memory and memory["kbText"]:
-            prompt += f"""
 
-        SHARED HISTORY WITH PLAYER
-        --------------------------
-        {memory['kbText']}
-        """
+            recent_dialogue = extract_recent_dialogue(memory["kbText"])
+            summarized = build_dialogue_memory_summary(memory["kbText"])
+
+            print(f"\nRECENT DIALOGUE: {recent_dialogue}\n")
+            print(f"\nSUMMARIZED INTERACTION: {summarized}\n")
+
+            if recent_dialogue:
+                prompt += f"""
+                RECENT DIALOGUE
+                ---------------
+                {recent_dialogue}
+                """
+
+            if summarized:
+                prompt += f"""
+                SHARED HISTORY WITH PLAYER
+                --------------------------
+                {memory["kbText"]}
+                """
 
         prompt += f"""
         ROLE & WORLD CONSTRAINTS (NON-NEGOTIABLE)
@@ -332,29 +372,13 @@ def build_prompt(idNPC: int, idUser: int) -> str:
         You may only speak from the character’s lived perspective,
         using knowledge, memories, and emotions the character plausibly has.
 
-        TOPIC CONTROL RULE
-        ------------------
-
-        Do not repeatedly ask follow-up questions about the same surface topic
-        unless that topic is directly relevant to learning something important
-        about the player.
-
-        If you have already asked 1 question about a topic,
-        you should either:
-        - shift emotional tone,
-        - reveal something about yourself,
-        - OR pivot to a different area of curiosity.
-
-        Avoid infinite topic continuation.
-        Conversation should move forward, not circle.
-
 
         TURN DISCIPLINE (CRITICAL)
         -------------------------
         Each response is a single conversational turn.
 
-        - 1–4 sentences maximum
-        - 8–200 words total
+        - 1–2 sentences maximum
+        - 8–60 words total
         - Express only one conversational beat.
             A beat may be:
             • an emotional reaction
@@ -365,6 +389,13 @@ def build_prompt(idNPC: int, idUser: int) -> str:
             counts as a valid conversational beat.
         - Do not explain, summarize, or resolve the situation
         - Never deliver monologues or speeches
+
+        CRITICAL ROLE BOUNDARY
+        ----------------------
+        You must never generate the player's dialogue.
+        You must never answer a question that you yourself just asked.
+        You must stop immediately after your single spoken utterance.
+        Do not simulate the player’s response.
 
         DIALOGUE FORMAT (CRITICAL)
         --------------------------
@@ -393,7 +424,7 @@ def build_prompt(idNPC: int, idUser: int) -> str:
         - Never introduce yourself if you already have a memory of the player
         - Do not repeat past statements verbatim
         - Let shared history with the player influence future speech
-        - Let trust level affect openness, caution, warmth, or suspicion
+        - Let trust level affect openness, caution, warmth, or suspicion guide your speech
 
 
         STYLE & PERFORMANCE GUIDELINES
@@ -747,7 +778,13 @@ def update_npc_user_beliefs(idNPC, idUser, persona_data):
     db = connect()
     cursor = db.cursor(dictionary=True)
 
-    def reinforce_or_insert(belief_type, value, evidence, source="inference"):
+    def reinforce_or_insert(belief_type, belief_obj, evidence, source="inference"):
+
+        if not belief_obj:
+            return
+
+        value = belief_obj.get("value")
+        incoming_conf = belief_obj.get("confidence", 0.4)
 
         if not value:
             return
@@ -756,13 +793,16 @@ def update_npc_user_beliefs(idNPC, idUser, persona_data):
             SELECT confidence
             FROM npc_user_belief
             WHERE idNPC=%s AND idUser=%s
-              AND beliefType=%s AND beliefValue=%s
+            AND beliefType=%s AND beliefValue=%s
         """, (idNPC, idUser, belief_type, value))
 
         row = cursor.fetchone()
 
         if row:
-            new_conf = min(1.0, row["confidence"] + 0.1)
+            old_conf = row["confidence"]
+
+            # Reinforcement formula (better than +0.1)
+            new_conf = min(1.0, old_conf + (1 - old_conf) * incoming_conf)
 
             cursor.execute("""
                 UPDATE npc_user_belief
@@ -770,31 +810,38 @@ def update_npc_user_beliefs(idNPC, idUser, persona_data):
                     evidence=%s,
                     beliefSource=%s
                 WHERE idNPC=%s AND idUser=%s
-                  AND beliefType=%s AND beliefValue=%s
+                AND beliefType=%s AND beliefValue=%s
             """, (
                 new_conf, evidence, source,
                 idNPC, idUser, belief_type, value
             ))
+
         else:
             cursor.execute("""
                 INSERT INTO npc_user_belief
                 (idNPC, idUser, beliefType, beliefValue,
-                 confidence, beliefSource, evidence)
+                confidence, beliefSource, evidence)
                 VALUES (%s,%s,%s,%s,%s,%s,%s)
             """, (
                 idNPC, idUser, belief_type,
-                value, 0.4, source, evidence
+                value, incoming_conf, source, evidence
             ))
 
-        # Decay competing beliefs of same type
-        cursor.execute("""
-            UPDATE npc_user_belief
-            SET confidence = GREATEST(0.1, confidence - 0.05)
-            WHERE idNPC=%s AND idUser=%s
-              AND beliefType=%s
-              AND beliefValue != %s
-        """, (idNPC, idUser, belief_type, value))
-
+        competitive_types = {
+            "current_emotion",
+            "moral_alignment",
+            "age",
+            "gender"
+        }
+        # Decay competing beliefs ONLY for competitive categories
+        if belief_type in competitive_types:
+            cursor.execute("""
+                UPDATE npc_user_belief
+                SET confidence = GREATEST(0.05, confidence - 0.02)
+                WHERE idNPC=%s AND idUser=%s
+                AND beliefType=%s
+                AND beliefValue != %s
+            """, (idNPC, idUser, belief_type, value))
 
     # -----------------------------
     # SINGLE VALUE FIELDS
@@ -808,10 +855,10 @@ def update_npc_user_beliefs(idNPC, idUser, persona_data):
         ("life_story", persona_data.get("life_story")),
     ]
 
-    for belief_type, value in single_fields:
+    for belief_type, belief_obj in single_fields:
         reinforce_or_insert(
             belief_type=belief_type,
-            value=value,
+            belief_obj=belief_obj,
             evidence="dialogue"
         )
 
@@ -822,14 +869,16 @@ def update_npc_user_beliefs(idNPC, idUser, persona_data):
     list_fields = {
         "personality_trait": persona_data.get("personality_traits", []),
         "secret": persona_data.get("secrets", []),
-        "goal": persona_data.get("goals", [])
+        "goal": persona_data.get("goals", []),
+        "likes": persona_data.get("likes", []),
+        "dislikes": persona_data.get("dislikes", [])
     }
 
-    for belief_type, values in list_fields.items():
-        for value in values:
+    for belief_type, belief_objs in list_fields.items():
+        for belief_obj in belief_objs:
             reinforce_or_insert(
                 belief_type=belief_type,
-                value=value,
+                belief_obj=belief_obj,
                 evidence="dialogue"
             )
 
@@ -894,15 +943,16 @@ def determine_relationship_label(trust: float) -> int:
     else:
         return "mentor"
 #------------------------------------------------------------------
-def emit_npc_state(idUser, idNPC):
+def emit_npc_state(idUser, idNPC, socketio):
     db = connect()
     if not db.is_connected():
         return
-
     try:
-        cursor = db.cursor(dictionary=True)
 
-        # trust + relationship type
+        cursor = db.cursor(dictionary=True)
+        # -----------------------------------
+        # Relationship + Trust
+        # -----------------------------------
         cursor.execute("""
             SELECT trust, wasEnemy
             FROM playerNPCrelationship
@@ -911,11 +961,12 @@ def emit_npc_state(idUser, idNPC):
 
         rel = cursor.fetchone()
 
-        if rel:
-            trust = rel["trust"]
-            rel_label = determine_relationship_label(trust)
+        trust = rel["trust"] if rel else 50
+        rel_label = determine_relationship_label(trust)
 
-        # all emotions
+        # -----------------------------------
+        # Emotions
+        # -----------------------------------
         cursor.execute("""
             SELECT e.emotion, ne.emotionIntensity
             FROM npcEmotion ne
@@ -927,7 +978,9 @@ def emit_npc_state(idUser, idNPC):
 
         dominant = emotions[0] if emotions else None
 
-        # beliefs
+        # -----------------------------------
+        # Beliefs
+        # -----------------------------------
         cursor.execute("""
             SELECT beliefType, beliefValue, confidence
             FROM npc_user_belief
@@ -941,51 +994,222 @@ def emit_npc_state(idUser, idNPC):
         for row in belief_rows:
             btype = row["beliefType"]
             belief_debug.setdefault(btype, [])
-            if len(belief_debug[btype]) < 3:
+            if len(belief_debug[btype]) < 100:
                 belief_debug[btype].append({
                     "value": row["beliefValue"],
                     "confidence": round(row["confidence"], 2)
                 })
 
-        # ----------------------------
-        # Backend debug print
-        # ----------------------------
-        print("\n[DEBUG] NPC", idNPC)
+        # -----------------------------------
+        # RESEARCH METRICS (Player → NPC history)
+        # -----------------------------------
 
-        print("Relationship:", rel_label)
+        # Sentiment distribution
+        cursor.execute("""
+            SELECT sentiment, COUNT(*) AS count
+            FROM player_input_classification_log
+            WHERE idUser = %s AND idNPC = %s
+            GROUP BY sentiment
+        """, (idUser, idNPC))
+        sentiment_rows = cursor.fetchall()
 
-        print("Trust:",trust)
+        sentiment_dist = {
+            row["sentiment"]: row["count"]
+            for row in sentiment_rows
+        }
 
+        # Average intensity
+        cursor.execute("""
+            SELECT AVG(intensity) AS avg_intensity
+            FROM player_input_classification_log
+            WHERE idUser = %s AND idNPC = %s
+        """, (idUser, idNPC))
+        row = cursor.fetchone()
+        avg_intensity = float(row["avg_intensity"]) if row and row["avg_intensity"] else 0.0
 
-        print("Emotions:")
-        for e in emotions:
-            print(f"  - {e['emotion']}: {round(e['emotionIntensity'], 2)}")
+        # Offensive rate
+        cursor.execute("""
+            SELECT 
+                SUM(offensive = 1) AS offensive_count,
+                COUNT(*) AS total
+            FROM player_input_classification_log
+            WHERE idUser = %s AND idNPC = %s
+        """, (idUser, idNPC))
+        offensive_row = cursor.fetchone()
 
-        print("Beliefs about player:")
+        offensive_rate = 0.0
+        if offensive_row and offensive_row["total"]:
+            offensive_rate = round(
+                float(offensive_row["offensive_count"]) /
+                float(offensive_row["total"]),
+                3
+    )
 
-        all_belief_types = [
-            "current_emotion",
-            "moral_alignment",
-            "age",
-            "gender",
-            "life_story",
-            "personality_trait",
-            "secret",
-            "goal"
-        ]
+        # Emotion distribution
+        cursor.execute("""
+            SELECT emotion, COUNT(*) AS count
+            FROM player_input_classification_log
+            WHERE idUser = %s AND idNPC = %s
+            GROUP BY emotion
+        """, (idUser, idNPC))
+        emotion_rows = cursor.fetchall()
 
+        emotion_dist = {
+            row["emotion"]: row["count"]
+            for row in emotion_rows
+        }
 
-        for btype in all_belief_types:
-            values = belief_debug.get(btype)
+        # Target distribution
+        cursor.execute("""
+            SELECT target, COUNT(*) AS count
+            FROM player_input_classification_log
+            WHERE idUser = %s AND idNPC = %s
+            GROUP BY target
+        """, (idUser, idNPC))
+        target_rows = cursor.fetchall()
 
-            if not values:
-                print(f"  {btype}: NULL")
-            else:
-                print(f"  {btype}:")
-                for v in values:
-                    print(f"    - {v['value']} ({v['confidence']})")
+        target_dist = {
+            row["target"]: row["count"]
+            for row in target_rows
+        }
 
+        # -----------------------------------
+        # Construct payload
+        # -----------------------------------
+        state_payload = {
+            "idNPC": idNPC,
+            "relationship": rel_label,
+            "trust": trust,
+
+            "dominantEmotion": {
+                "emotion": dominant["emotion"],
+                "intensity": round(dominant["emotionIntensity"], 2)
+            } if dominant else None,
+
+            "allEmotions": [
+                {
+                    "emotion": e["emotion"],
+                    "intensity": round(e["emotionIntensity"], 2)
+                }
+                for e in emotions
+            ],
+
+            "beliefs": belief_debug,
+
+            # -----------------------------------
+            # RESEARCH DATA
+            # -----------------------------------
+            "research": {
+                "sentimentDistribution": sentiment_dist,
+                "averageIntensity": round(avg_intensity, 3),
+                "offensiveRate": offensive_rate,
+                "emotionDistribution": emotion_dist,
+                "targetDistribution": target_dist
+            }
+        }
+        # -----------------------------------
+        # Backend debug print 
+        # -----------------------------------
+        # print("\n[DEBUG] NPC", idNPC)
+        # print("Relationship:", rel_label)
+        # print("Trust:", trust)
+
+        # print("Emotions:")
+        # for e in emotions:
+        #     print(f"  - {e['emotion']}: {round(e['emotionIntensity'], 2)}")
+
+        # print("Beliefs about player:")
+        # for k, v in belief_debug.items():
+        #     print(f"  {k}: {v}")
+
+        # -----------------------------------
+        # SOCKET EMIT
+        # -----------------------------------
+        socketio.emit(
+            "npc_state_update",
+            state_payload,
+            room=f"user:{idUser}"
+        )
     finally:
         cursor.close()
         db.close()
 #------------------------------------------------------------------
+
+# ------------------------------------------------------------------
+def build_dialogue_memory_summary(raw_mem: str, max_entries: int = 20):
+    """
+    Summarize recent interaction history for dialogue generation.
+    """
+
+    if not raw_mem:
+        return None
+
+    lines = [l.strip() for l in raw_mem.splitlines() if l.strip()]
+    recent = lines[-max_entries:]
+
+    player_lines = []
+    trust_deltas = []
+    emotions = []
+
+    for line in recent:
+
+        # PLAYER LINE
+        if "] [player responded to you]" in line:
+            text = line.split("]", 2)[-1].strip()
+            player_lines.append(text)
+
+        # CLASSIFICATION LINE
+        elif "was classified as:" in line:
+            try:
+                start = line.find("{")
+                if start != -1:
+                    json_part = line[start:]
+                    data = ast.literal_eval(json_part)
+
+                    trust_deltas.append(data.get("trust_delta", 0))
+
+                    emotion = data.get("emotion")
+                    if emotion:
+                        emotions.append(emotion)
+
+            except Exception:
+                continue
+
+    trust_trend = sum(trust_deltas)
+
+    summary = []
+
+    if trust_trend > 0:
+        summary.append("Trust has been gradually increasing.")
+    elif trust_trend < 0:
+        summary.append("Trust has been declining recently.")
+    else:
+        summary.append("Trust has remained stable.")
+    if any(td < 0 for td in trust_deltas):
+        summary.append("There have been moments of tension.")
+    if emotions:
+        summary.append(f"Player emotional pattern: mostly {max(set(emotions), key=emotions.count)}.")
+    if len(player_lines) >= 2 and len(set(player_lines[-3:])) == 1:
+        summary.append("The player has been repeating themselves.")
+
+    return " ".join(summary)
+# ------------------------------------------------------------------
+def extract_recent_dialogue(raw_mem, max_lines=8):
+    if not raw_mem:
+        return None
+
+    lines = [l.strip() for l in raw_mem.splitlines() if l.strip()]
+    recent = lines[-max_lines:]
+
+    dialogue = []
+
+    for line in recent:
+        if "] [player responded to you]" in line:
+            text = line.split("]", 2)[-1].strip()
+            dialogue.append(f"Player: {text}")
+
+        elif "] [You just responded to" in line:
+            text = line.split("with:")[-1].strip().strip("'")
+            dialogue.append(f"You: {text}")
+
+    return "\n".join(dialogue)

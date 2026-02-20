@@ -33,7 +33,6 @@ socketio = SocketIO(camo, cors_allowed_origins="*")
 def onConnect():
     print("player connected")
 
-
 @socketio.on("register_user")
 def register_user(data):
     print('registering user')
@@ -115,10 +114,8 @@ def npc_interact():
         raw_mem = get_mem(idNPC=idNPC, idUser=idUser)
         # cls_mem = openAIqueries.build_classification_context(raw_mem, 6)
 
-        print(f"\nRECENT MEMORIES: {raw_mem}\n")
-
         classification = openAIqueries.classify_player_input(
-            data["playerText"], raw_mem, client
+            data["playerText"], raw_mem, client, idNPC, idUser
         )
 
         trust_delta  = classification["trust_delta"]
@@ -254,17 +251,16 @@ def npc_interact():
                 )
                 socketio.sleep(0)
 
-        # ----------------------------------------------------------
-        # done sending
-        # ----------------------------------------------------------
-        socketio.emit("npc_text_done", {}, room=f"user:{idUser}")
-        socketio.emit("npc_audio_done", {}, room=f"user:{idUser}")
+    
 
         # ----------------------------------------------------------
         # update KB with NPC response
         # ----------------------------------------------------------
         text = "".join(full_text)
         kbText = f"[You just responded to {pName} with:] '{text}'"
+
+        print(f"\nNPC RESPONSE: {kbText}\n")
+
         update_NPC_user_memory_query(
             idNPC=idNPC,
             idUser=idUser,
@@ -280,10 +276,14 @@ def npc_interact():
         intensity = min(1.0, base_intensity * reactivity)
 
         set_npc_emotion(idNPC, emotion_name, intensity)
+  
 
-        # update relationship here (take all the data from the player text classification)?
-
-        emit_npc_state(idUser, idNPC)
+        # ----------------------------------------------------------
+        # done sending
+        # ----------------------------------------------------------
+        socketio.emit("npc_text_done", {}, room=f"user:{idUser}")
+        socketio.emit("npc_audio_done", {}, room=f"user:{idUser}")
+        emit_npc_state(idUser, idNPC, socketio)
 
         return jsonify({"success": True}), 200
 

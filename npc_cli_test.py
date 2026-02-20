@@ -1,5 +1,5 @@
-import requests
-import socketio
+import requests # type: ignore
+import socketio # type: ignore
 import base64
 import sys
 import threading

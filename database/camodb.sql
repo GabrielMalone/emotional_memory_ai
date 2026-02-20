@@ -482,7 +482,9 @@ CREATE TABLE npc_user_belief (
     'life_story',
     'personality_trait',
     'secret',
-    'goal'
+    'goal',
+    'likes',
+    'dislikes'
   ) NOT NULL,
 
   beliefValue VARCHAR(255) NOT NULL,
@@ -518,6 +520,33 @@ CREATE TABLE npc_user_belief (
     ON DELETE CASCADE
 );
 
+
+CREATE TABLE player_input_classification_log (
+    idLog INT AUTO_INCREMENT PRIMARY KEY,
+
+    idUser INT NOT NULL,
+    idNPC INT NOT NULL,
+
+    playerText TEXT NOT NULL,
+
+    sentiment VARCHAR(50),
+    intensity FLOAT DEFAULT 0.0,
+    offensive TINYINT(1) DEFAULT 0,
+
+    emotion VARCHAR(100),
+    target VARCHAR(100),
+
+    trust_delta INT DEFAULT 0,
+
+    modelUsed VARCHAR(100),
+    temperature FLOAT DEFAULT 0.0,
+
+    createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+    INDEX idx_user (idUser),
+    INDEX idx_npc (idNPC),
+    INDEX idx_created (createdAt)
+);
 -- -----------------------------------------------------
 -- Seed data
 -- -----------------------------------------------------
@@ -545,8 +574,8 @@ VALUES
 INSERT INTO NPC
 (nameFirst, nameLast, age, gender)
 VALUES
-('Emory',  NULL,        26, 'female'),
-('Adwin',  'Roberts',    7, 'male');
+('Emory',  NULL,        24, 'female'),
+('Adwina',  'Roberts',    37, 'female');
 
 
 INSERT INTO npc_persona (
@@ -559,21 +588,23 @@ INSERT INTO npc_persona (
   moral_alignment
 )
 VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwin'),
-  'Child artisan and festival designer',
-  'Creative, earnest, enthusiastic, sensitive, easily overwhelmed, kind-hearted',
+  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwina'),
+  'Artist, Actress, Athlete, religious, follows the law strictly',
+  'Creative, shy, earnest, enthusiastic, sensitive, easily overwhelmed, kind-hearted',
   'Responds strongly to encouragement and praise; becomes anxious when rushed or confronted; avoids conflict and seeks help when stressed',
   1.25,
-  'Speaks in short, excited sentences with childlike enthusiasm; asks curious questions; sounds nervous when overwhelmed',
-  'Well-meaning and cooperative; prioritizes kindness and fairness; dislikes hurting others'
+  'asks curious questions; sounds nervous when overwhelmed',
+  'Well-meaning and cooperative, but may have ulterior motives.'
 );
 
 -- background info for Adwin
 INSERT INTO background (idNPC, BGcontent)
 VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwin'),
-  'You are Adwin Roberts. You love the arts, especially designing patterns and making clothes. You often create design patterns digitally and then order prints and fabric online. You also know how to sew. At the town’s annual bartering festival, you sell handmade clothing such as crocheted vests and quilted jackets. You are a six-year-old boy, so your mother helps you with the business.'
+  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwina'),
+  'You are Adwina Roberts.  You love the arts, and working out, competing in athletics.'
 );
+
+
 
 SET SQL_MODE=@OLD_SQL_MODE;
 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;
