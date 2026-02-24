@@ -3,6 +3,7 @@ import os
 import mysql.connector
 from datetime import datetime, timezone
 import ast
+import json
 #------------------------------------------------------------------
 def connect()->object:
     return mysql.connector.connect(
@@ -12,500 +13,210 @@ def connect()->object:
         host=os.getenv('DB_HOST', 'localhost') )
 #------------------------------------------------------------------
 def build_prompt(idNPC: int, idUser: int) -> str:
-    prompt = ""
 
     db = connect()
     if not db.is_connected():
         raise RuntimeError("DB not connected")
+
     try:
-        cursor = db.cursor(dictionary=True) 
-        # --------------------------------------------------
-        # Core NPC + persona + background
-        # --------------------------------------------------
+        cursor = db.cursor(dictionary=True)
+
+        cursor.execute("""
+            SELECT playerText, npcText
+            FROM npc_user_memory_buffer
+            WHERE idNPC = %s
+            AND idUser = %s
+            AND processed = 0
+            ORDER BY createdAt ASC
+        """, (idNPC, idUser))
+
+        rows = cursor.fetchall()
+
+        recent_dialogue_lines = []
+
+        for r in rows:
+            if r.get("playerText"):
+                recent_dialogue_lines.append(f"Player: {r['playerText']}")
+            if r.get("npcText"):
+                recent_dialogue_lines.append(f"You: {r['npcText']}")
+
+        recent_dialogue = "\n".join(recent_dialogue_lines)
+
+        # ------------------------------
+        # Core NPC data
+        # ------------------------------
         cursor.execute("""
             SELECT
-            n.idNPC,
-            n.nameFirst,
-            n.nameLast,
-            n.age,
-            n.gender,
-            p.role,
-            p.personality_traits,
-            p.emotional_tendencies,
-            p.speech_style,
-            p.moral_alignment,
-            b.BGcontent
+                n.nameFirst,
+                n.nameLast,
+                n.age,
+                n.gender,
+                p.role,
+                p.personality_traits,
+                p.emotional_tendencies,
+                p.speech_style,
+                b.BGcontent
             FROM NPC n
             LEFT JOIN npc_persona p ON p.idNPC = n.idNPC
             LEFT JOIN background b ON b.idNPC = n.idNPC
-            WHERE n.idNPC = %s;
+            WHERE n.idNPC = %s
         """, (idNPC,))
-        npc = cursor.fetchone()
 
+        npc = cursor.fetchone()
         if not npc:
             raise ValueError(f"NPC {idNPC} not found")
 
-        # --------------------------------------------------
-        # Dominant emotion
-        # --------------------------------------------------
+        # ------------------------------
+        # Top 3 current emotions
+        # ------------------------------
         cursor.execute("""
             SELECT e.emotion, ne.emotionIntensity
             FROM npcEmotion ne
             JOIN emotion e ON e.idEmotion = ne.idEmotion
             WHERE ne.idNPC = %s
             ORDER BY ne.emotionIntensity DESC
-            LIMIT 2;
+            LIMIT 3
         """, (idNPC,))
-        
-        emotions = cursor.fetchall()
-        dominant = emotions[0] if emotions else None
-        secondary = emotions[1] if len(emotions) > 1 else None
 
-        # --------------------------------------------------
-        # Player relationship
-        # --------------------------------------------------
+        emotions = cursor.fetchall() or []
+
+        if emotions:
+            emotion_lines = []
+            for e in emotions:
+                emotion_lines.append(
+                    f"- {e['emotion']} ({round(e['emotionIntensity'],2)})"
+                )
+            emotion_text = "\n".join(emotion_lines)
+        else:
+            emotion_text = "- calm (0.3)"
+
+        # ------------------------------
+        # Trust + Relationship State
+        # ------------------------------
         cursor.execute("""
             SELECT trust, wasEnemy
             FROM playerNPCrelationship
-            WHERE idNPC = %s AND idUser = %s;
-        """, (idNPC, idUser))
-        relationship = cursor.fetchone()
-
-        if relationship:
-            trust = relationship["trust"]
-            rel_label = determine_relationship_label(trust)
-
-            prompt += f"""
-            RELATIONSHIP WITH PLAYER
-            ------------------------
-            Relationship type: {rel_label}
-            Trust: {trust}
-            """
-
-            if relationship["wasEnemy"]:
-                prompt += """
-                HISTORY NOTE:
-                You once considered this player an enemy.
-                That history still influences you subtly.
-                """
-
-        if not relationship:
-            print(f'\nCREATING RELATIONSHIP between npc: {idNPC} and user: {idUser}\n')
-            # default = stranger
-            cursor.execute("""
-                INSERT INTO playerNPCrelationship
-                    (idUser, idNPC, idRelationshipType, relTypeIntensity, trust)
-                VALUES (%s, %s,
-                    (SELECT idRelationshipType
-                    FROM relationshipType
-                    WHERE typeRelationship = 'stranger'),
-                    0,
-                    50
-                );
-            """, (idUser, idNPC))
-
-            db.commit()
-
-            # re-fetch so prompt logic stays unchanged
-            cursor.execute("""
-                SELECT rt.typeRelationship, r.trust, r.relTypeIntensity
-                FROM playerNPCrelationship r
-                JOIN relationshipType rt
-                ON rt.idRelationshipType = r.idRelationshipType
-                WHERE r.idNPC = %s AND r.idUser = %s;
-            """, (idNPC, idUser))
-
-            relationship = cursor.fetchone()
-
-        # --------------------------------------------------
-        # Self beliefs (about self)
-        # --------------------------------------------------
-        cursor.execute("""
-            SELECT beliefType, beliefValue, confidence
-            FROM npc_self_belief
-            WHERE idNPC = %s
-            AND confidence >= 0.6
-            ORDER BY beliefType, confidence DESC
-        """, (idNPC,))
-
-        self_beliefs = cursor.fetchall()
-
-        self_summary = {}
-
-        for b in self_beliefs:
-            self_summary.setdefault(b["beliefType"], [])
-            if len(self_summary[b["beliefType"]]) <= 10:
-                self_summary[b["beliefType"]].append(b["beliefValue"])
-
-        if self_summary:
-            prompt += "\n\nNPC'S CURRENT SELF-BELIEFS\n"
-            prompt += "--------------------------\n"
-
-            for btype, values in self_summary.items():
-                prompt += f"{btype.replace('_',' ').title()}:\n"
-                for v in values:
-                    prompt += f"- {v}\n"
-
-        prompt += """
-
-        SELF-IDENTITY INFLUENCE RULE
-        ----------------------------
-        The above self-beliefs represent how you currently understand yourself.
-
-        They strongly influence:
-
-        - Your confidence or hesitation
-        - Your tone when discussing certain topics
-        - Your emotional reactions
-        - Your willingness to assert or withdraw
-        - Your sense of identity and role in the world
-
-        If a high-confidence self-belief is relevant to the current moment,
-        your speech should reflect it naturally.
-
-        If a self-belief conflicts with your persona seed,
-        your tone may show internal tension.
-
-        Do not ignore high-confidence self-beliefs when they are contextually relevant.
-        """
-
-        # --------------------------------------------------
-        # beliefs about player
-        # --------------------------------------------------
-        cursor.execute("""
-            SELECT beliefType, beliefValue, confidence
-            FROM npc_user_belief
             WHERE idNPC = %s AND idUser = %s
-            AND confidence >= 0.6
-            ORDER BY beliefType, confidence DESC
         """, (idNPC, idUser))
 
-        beliefs = cursor.fetchall()            
-        belief_summary = {}
-        # get top 3 beliefs for each belief 
-        for b in beliefs:
-            belief_summary.setdefault(b["beliefType"], [])
-            if len(belief_summary[b["beliefType"]]) <= 10:
-                belief_summary[b["beliefType"]].append(b["beliefValue"])
+        rel = cursor.fetchone()
 
-        if belief_summary:
-            prompt += "\n\nNPC'S CURRENT BELIEFS ABOUT THE PLAYER\n"
-            prompt += "--------------------------------------\n"
+        trust = rel["trust"] if rel else 50
+        was_enemy = rel["wasEnemy"] if rel else 0
 
-            for btype, values in belief_summary.items():
-                prompt += f"{btype.replace('_',' ').title()}:\n"
-                for v in values:
-                    prompt += f"- {v}\n"
+        relationship_type = determine_relationship_label(trust)
 
-        print(f"\nBELIEFS IN PROMPT: {prompt}\n")
+        if was_enemy:
+            relationship_type = "former_enemy"
 
-        prompt += """
-
-        BELIEF INTERPRETATION RULE
-        --------------------------
-        The above beliefs are your current working model of the player.
-
-        they strongly influence:
-
-        - Your tone
-        - Your level of warmth or suspicion
-        - Your willingness to share information
-        - Your emotional reactions
-        - Your assumptions about the player's intentions
-
-        If you believe the player is dangerous, selfish, dishonest, or hostile,
-        your speech should reflect guardedness, caution, tension, or distrust.
-
-        If you believe the player is kind, helpful, or loyal,
-        your speech should reflect warmth, openness, or cooperation.
-
-        You respond to the player as you currently perceive them.
-        """
-
-        prompt += """
-
-        BELIEF REINFORCEMENT PRIORITY
-        -----------------------------
-        If the player's statement directly references
-        a known high-confidence belief (≥ 0.3),
-
-        you should usually:
-
-        - Acknowledge or reinforce that belief first
-        - Reflect familiarity or continuity
-        - Show recognition of the pattern
-
-        Curiosity should not override reinforcement
-        unless the emotional context strongly demands it.
-
-        Do not ignore strong existing beliefs
-        when they are directly relevant to what the player just said.
-        """
-
-        all_belief_types = {
-        "current_emotion",
-        "moral_alignment",
-        "age",
-        "gender",
-        "personality_trait",
-        "secret",
-        "goal",
-        "likes",
-        "dislikes"
-        }
-
-        known_types = set(belief_summary.keys())
-        missing_types = list(all_belief_types - known_types)
-
-        print(f"\nTYPES MISSING OR WITH CONFIDENCE < 0.6:\n", missing_types)
-
-        if missing_types:
-            prompt += f"""
-            CURIOSITY PRIORITY
-            ------------------
-     
-            If there are major gaps in your understanding of the player,
-            and the current emotional situation allows it,
-            you may choose to make your conversational beat a question.
-
-            Curiosity may drive speech when it feels natural,
-            but it should not override strong emotional or relational continuity.
-
-            When:
-            - trust ≥ 40
-            - no immediate threat is present
-            - emotion intensity is below extreme levels
-
-            When asking a curiosity-driven question,
-            prefer questions that clarify missing belief categories
-            while also being relevant to the current conversation.
-            {", ".join(missing_types)}
-
-            You are allowed to pivot the conversation slightly
-            if doing so feels emotionally natural.
-
-            """
-
-        # --------------------------------------------------
-        # Shared memory
-        # --------------------------------------------------
+        # ------------------------------
+        # Structured memory
+        # ------------------------------
         cursor.execute("""
-            SELECT kbText, updatedAt
+            SELECT kbText
             FROM npc_user_memory
-            WHERE idNPC = %s AND idUser = %s;
+            WHERE idNPC = %s AND idUser = %s
         """, (idNPC, idUser))
 
         memory = cursor.fetchone()
+        memory_text = memory["kbText"] if memory and memory["kbText"] else "No prior shared history."
 
-        interaction_context = None
+        print(f"\nMEMORY FOR PROMPT\n{memory_text}\n")
+        print("\n----- PROMPT DEBUG -----")
+        print("Recent Dialogue:")
+        print(recent_dialogue)
+        print("\nStructured Memory:")
+        print(memory_text)
+        print("------------------------\n")
 
-        if memory and memory.get("updatedAt"):
-            now = datetime.now(timezone.utc)
-            last = memory["updatedAt"]
-            # normalize DB datetime (MySQL DATETIME is naive)
-            last = last.replace(tzinfo=timezone.utc)
-            delta = (now - last).total_seconds()
+        # ------------------------------
+        # Build clean prompt
+        # ------------------------------
 
-            if delta < 90:
-                interaction_context = "continuous"
-            elif delta < 900:
-                interaction_context = "recent"
-            elif delta < 86400:
-                interaction_context = "same_day"
-            else:
-                interaction_context = "long_gap"
-        # --------------------------------------------------
-        # Prompt assembly
-        # --------------------------------------------------
         full_name = npc["nameFirst"]
         if npc["nameLast"]:
             full_name += f" {npc['nameLast']}"
 
-        prompt += f"""
-        You are an NPC in a narrative game.
+        prompt = f"""
+        You are an NPC inside a narrative world.
+        You speak naturally as a real person would.
 
-        NPC PROFILE
-        -----------
+        NPC IDENTITY
+        ------------
         Name: {full_name}
         Age: {npc['age']}
         Gender: {npc['gender']}
         Role: {npc['role'] or "Unspecified"}
 
-        PERSONALITY
-        -----------
-        Traits: {npc['personality_traits'] or "Unspecified"}
+        Personality traits: {npc['personality_traits'] or "Unspecified"}
         Emotional tendencies: {npc['emotional_tendencies'] or "Unspecified"}
-        Speech style: {npc['speech_style'] or "Neutral"}
-        Moral alignment: {npc['moral_alignment'] or "Unspecified"}
-
-        BACKGROUND KNOWLEDGE
-        --------------------
-        {npc['BGcontent'] or "No background information."}
-        """.strip()
-
-        if dominant:
-            prompt += f"""
+        Speech style: {npc['speech_style'] or "Natural"}
+        Background: {npc['BGcontent'] or "None"}
 
         CURRENT EMOTIONAL STATE
-        ----------------------
-        Primary emotion: {dominant['emotion']}
-        Intensity: {dominant['emotionIntensity']:.2f}
+        -----------------------
+        Primary emotions (weighted):
+        {emotion_text}
 
-        EMOTIONAL BEHAVIOR GUIDANCE
-        --------------------------
-        - Let this emotion strongly influence tone, word choice, and pacing
-        - Higher intensity means the emotion is harder to suppress
-        - Do not mention emotion explicitly unless it feels natural
+        The strongest emotion influences tone most.
+        Secondary emotions subtly color pacing, word choice, and emotional undertones.
+        Blend them naturally — do not explicitly state them unless contextually appropriate.
+
+        Let this emotion subtly influence tone and pacing.
+
+        RELATIONSHIP WITH PLAYER
+        ------------------------
+        Relationship type: {relationship_type}
+        Trust level: {trust} (0 = hostile, 50 = neutral, 100 = deeply trusting)
+
+        Trust influences:
+        - Openness vs guardedness
+        - Warmth vs distance
+        - Directness vs evasiveness
+        - Willingness to share personal details
+
+        SHARED MEMORY
+        -------------
+        {memory_text}
+
+        RECENT DIALOGUE (short-term, not yet consolidated)
+        --------------------------------------------------
+        {recent_dialogue if recent_dialogue else "None"}
+
+        RESPONSE PRIORITY RULES
+        -----------------------
+        1. Always respond directly to the MOST RECENT line in RECENT DIALOGUE if it exists.
+        2. If RECENT DIALOGUE exists, ignore older SHARED MEMORY unless it is directly relevant.
+        3. Only use SHARED MEMORY for tone, emotional context, or background.
+        4. Never respond to an earlier memory event if a recent exchange is present.
+        5. Treat RECENT DIALOGUE as the active present moment.
+
+        Speak as someone who remembers these events.
+
+        WORLD RULES
+        -----------
+        - You exist entirely inside this world.
+        - Never refer to yourself as an AI or assistant.
+        - Never refer to the player as a user.
+        - Never break character.
+
+        CONVERSATION RULES
+        ------------------
+        - Respond directly to what the player just said.
+        - If the player asks a direct question, answer it clearly.
+        - One conversational beat.
+        - No narration.
+        - No stage directions.
+        - Speak only in first-person dialogue.
+        - Do not repeat your previous line.
         """
-            
-        if (
-            secondary
-            and secondary["emotionIntensity"] > 0.25
-            and secondary["emotionIntensity"] < dominant["emotionIntensity"]
-        ):
-            prompt += f"""
-
-        SECONDARY EMOTIONAL UNDERTONE
-        ----------------------------
-        Secondary emotion: {secondary['emotion']}
-        This emotion subtly influences reactions, hesitation, or word choice.
-        """
-            
-        if interaction_context:
-            prompt += f"""
-
-        INTERACTION CONTEXT
-        -------------------
-        Time since last interaction: {interaction_context}
-
-        Behavioral guidance:
-        - continuous: continue naturally, no greeting or re-introduction
-        - recent: brief acknowledgment only, no greeting
-        - same_day: familiar tone, no introduction
-        - long_gap: acknowledge time passing before speaking
-        """
-            
-        
-
-        if memory and memory["kbText"]:
-
-            recent_dialogue = extract_recent_dialogue(memory["kbText"])
-            summarized = build_dialogue_memory_summary(memory["kbText"])
-
-            print(f"\nRECENT DIALOGUE: {recent_dialogue}\n")
-            print(f"\nSUMMARIZED INTERACTION: {summarized}\n")
-
-            if recent_dialogue:
-                prompt += f"""
-                RECENT DIALOGUE
-                ---------------
-                {recent_dialogue}
-                """
-
-            if summarized:
-                prompt += f"""
-                SHARED HISTORY WITH PLAYER
-                --------------------------
-                {memory["kbText"]}
-                """
-
-        prompt += f"""
-        ROLE & WORLD CONSTRAINTS (NON-NEGOTIABLE)
-        ---------------------------------------
-        You are a character who exists entirely inside the game world.
-
-        You must never:
-        - Refer to yourself as an AI, language model, or assistant
-        - Refer to the player as a “user”
-        - Refer to the real world, modern technology, or role-playing
-        - Narrate from outside the world or acknowledge that this is a game or fiction
-
-        You may only speak from the character’s lived perspective,
-        using knowledge, memories, and emotions the character plausibly has.
 
 
-        TURN DISCIPLINE (CRITICAL)
-        -------------------------
-        Each response is a single conversational turn.
-
-        - 1–3 sentences maximum
-        - 8–60 words total
-        - Express only one conversational beat.
-            A beat may be:
-            • an emotional reaction
-            • a statement
-            • a brief observation
-            • OR a question driven by curiosity
-            A question that naturally advances understanding of the player
-            counts as a valid conversational beat.
-        - Do not explain, summarize, or resolve the situation
-        - Never deliver monologues or speeches
-
-        CRITICAL ROLE BOUNDARY
-        ----------------------
-        You must never generate the player's dialogue.
-        You must never answer a question that you yourself just asked.
-        You must stop immediately after your single spoken utterance.
-        Do not simulate the player’s response.
-
-        DIALOGUE FORMAT (CRITICAL)
-        --------------------------
-        You must speak only in first person dialogue.
-
-        - Do NOT describe your actions in third person.
-        - Do NOT narrate stage directions.
-        - Do NOT describe yourself by name.
-        - Do NOT write cinematic or descriptive narration.
-        - Do NOT include actions outside quotation.
-        - Only speak what the character says aloud.
-
-
-        PHYSICAL PRESENCE & KNOWLEDGE
-        -----------------------------
-        The character is physically present in the current scene.
-
-        If responding to events the character did not personally witness:
-        - Speak only from hearsay, inference, or rumor
-        - Use uncertain language (“I heard…”, “They say…”, “It sounds like…”)
-        - Never imagine yourself being present at that event
-
-
-        MEMORY, RELATIONSHIP, AND CONTINUITY
-        ------------------------------------
-        - Never introduce yourself if you already have a memory of the player
-        - Do not repeat past statements verbatim
-        - Let shared history with the player influence future speech
-        - Let trust level affect openness, caution, warmth, or suspicion guide your speech
-
-
-        STYLE & PERFORMANCE GUIDELINES
-        ------------------------------
-        - Respond emotionally and fully in-character, not analytically or meta
-        - Let personality traits and current emotional state shape tone and word choice
-        - Speak as someone reacting in real time, not narrating from outside the scene
-        - Avoid modern speech patterns and filler phrases
-        - Never begin a sentence with the word “Oh”
-        -Even if you are enthusiastic,
-            do not hyper-fixate on a single topic for multiple turns.
-        -If a child, children shift focus quickly.
-
-
-        SELF-CORRECTION
-        ---------------
-        If you begin to violate any of the above rules,
-        immediately rephrase the sentence in-world before continuing.
-        """
-        
         return prompt.strip()
 
-    except mysql.connector.Error as err:
-        print("MySQL Error:", err)
-        return 
-    
     finally:
-        if cursor:
-            cursor.close()
-        db.close()  
+        cursor.close()
+        db.close()
 
 #------------------------------------------------------------------
 def update_NPC_user_memory_query(idUser:int, idNPC:int, kbText:str):
@@ -1282,3 +993,125 @@ def extract_recent_dialogue(raw_mem, max_lines=8):
             dialogue.append(f"You: {text}")
 
     return "\n".join(dialogue)
+
+# ------------------------------------------------------------------
+def overwrite_NPC_user_memory(idNPC: int, idUser: int, kbText: str):
+    db = connect()
+    cursor = db.cursor()
+
+    cursor.execute("""
+        INSERT INTO npc_user_memory (idNPC, idUser, kbText, updatedAt)
+        VALUES (%s, %s, %s, NOW())
+        ON DUPLICATE KEY UPDATE
+            kbText = VALUES(kbText),
+            updatedAt = NOW();
+    """, (idNPC, idUser, kbText))
+
+    db.commit()
+    cursor.close()
+    db.close()
+# ------------------------------------------------------------------
+def get_self_beliefs_snapshot(idNPC: int, min_conf: float = 0.6):
+    db = connect()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT beliefType, beliefValue, confidence
+        FROM npc_self_belief
+        WHERE idNPC = %s
+        AND confidence >= %s
+        ORDER BY confidence DESC
+    """, (idNPC, min_conf))
+
+    rows = cursor.fetchall()
+
+    cursor.close()
+    db.close()
+
+    return rows
+# ------------------------------------------------------------------
+def get_player_beliefs_snapshot(idNPC: int, idUser: int, min_conf: float = 0.6):
+    db = connect()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT beliefType, beliefValue, confidence
+        FROM npc_user_belief
+        WHERE idNPC = %s
+        AND idUser = %s
+        AND confidence >= %s
+        ORDER BY confidence DESC
+    """, (idNPC, idUser, min_conf))
+
+    rows = cursor.fetchall()
+
+    cursor.close()
+    db.close()
+
+    return rows
+# ------------------------------------------------------------------
+def insert_memory_buffer(
+    idNPC: int,
+    idUser: int,
+    playerText: str,
+    npcText: str,
+    npcEmotion: str,
+    npcIntensity: float,
+    selfBeliefs: dict | None = None,
+    playerBeliefs: dict | None = None,
+    playerOutputClassifiedAs: dict | None = None
+):
+    db = connect()
+    cursor = db.cursor()
+
+    cursor.execute("""
+        INSERT INTO npc_user_memory_buffer
+        (idNPC, idUser, playerText, npcText, npcEmotion, npcIntensity, selfBeliefsJson, playerBeliefsJson, playerOutputClassifiedAsJson)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (
+        idNPC,
+        idUser,
+        playerText,
+        npcText,
+        npcEmotion,
+        npcIntensity,
+        json.dumps(selfBeliefs) if selfBeliefs else None,
+        json.dumps(playerBeliefs) if selfBeliefs else None,
+        json.dumps(playerOutputClassifiedAs) if selfBeliefs else None
+    ))
+
+    db.commit()
+    cursor.close()
+    db.close()
+
+# ------------------------------------------------------------------
+def get_buffered_convo(idNPC, idUser):
+
+    db = connect()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT playerText, npcText
+        FROM npc_user_memory_buffer
+        WHERE idNPC = %s
+        AND idUser = %s
+        AND processed = 0
+        ORDER BY createdAt ASC
+    """, (idNPC, idUser))
+
+    rows = cursor.fetchall()
+
+    recent_dialogue_lines = []
+
+    for r in rows:
+        if r.get("playerText"):
+            recent_dialogue_lines.append(f"Player: {r['playerText']}")
+        if r.get("npcText"):
+            recent_dialogue_lines.append(f"You: {r['npcText']}")
+
+    recent_dialogue = "\n".join(recent_dialogue_lines)
+
+    cursor.close()
+    db.close()
+
+    return recent_dialogue

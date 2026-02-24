@@ -276,6 +276,51 @@ CREATE TABLE IF NOT EXISTS `camodb`.`npc_user_memory` (
     ON UPDATE NO ACTION)
 ENGINE = InnoDB;
 
+-- -----------------------------------------------------
+-- Table `camodb`.`npc_user_memory_buffer`
+-- Raw, append-only turn log for background consolidation
+-- -----------------------------------------------------
+CREATE TABLE IF NOT EXISTS `camodb`.`npc_user_memory_buffer` (
+  `idBuffer` BIGINT NOT NULL AUTO_INCREMENT,
+
+  `idNPC` INT NOT NULL,
+  `idUser` INT NOT NULL,
+
+  `playerText` TEXT NULL,
+  `npcText` MEDIUMTEXT NULL,
+
+  `npcEmotion` VARCHAR(64) NULL,
+  `npcIntensity` FLOAT NULL,
+
+  `selfBeliefsJson` JSON NULL,   -- optional, store extracted self-beliefs
+  `playerBeliefsJson` JSON NULL,   -- optional, store extracted player-beliefs
+  `playerOutputClassifiedAsJson` JSON NULL,   -- optional, store extracted player output classifiction
+  
+  `metaJson` JSON NULL,          -- optional, any extra (scene tag, model, etc.)
+
+  `createdAt` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `processedAt` DATETIME NULL,
+  `processed` TINYINT(1) NOT NULL DEFAULT 0,
+
+  PRIMARY KEY (`idBuffer`),
+
+  INDEX `idx_mem_buf_npc_user_processed_created` (`idNPC`, `idUser`, `processed`, `createdAt`),
+
+  CONSTRAINT `fk_mem_buf_npc`
+    FOREIGN KEY (`idNPC`)
+    REFERENCES `camodb`.`NPC` (`idNPC`)
+    ON DELETE CASCADE
+    ON UPDATE NO ACTION,
+
+  CONSTRAINT `fk_mem_buf_user`
+    FOREIGN KEY (`idUser`)
+    REFERENCES `camodb`.`user` (`idUser`)
+    ON DELETE CASCADE
+    ON UPDATE NO ACTION
+)
+ENGINE = InnoDB
+DEFAULT CHARACTER SET = utf8mb4;
+
 
 -- -----------------------------------------------------
 -- Table `camodb`.`background`
@@ -451,7 +496,7 @@ ENGINE = InnoDB;
 -- -----------------------------------------------------
 CREATE TABLE npc_persona (
   idNPC INT NOT NULL,
-  role VARCHAR(64) NOT NULL,
+  role VARCHAR(255) NOT NULL,
   personality_traits TEXT NOT NULL,
   emotional_tendencies TEXT NOT NULL,
   emotion_decay_rate FLOAT DEFAULT 0.9,
@@ -606,9 +651,8 @@ VALUES
 INSERT INTO NPC
 (nameFirst, nameLast, age, gender)
 VALUES
-('Emory',  NULL,        24, 'female'),
-('Elara', 'Virelli', 42, 'female'),
-('Adwina',  'Roberts',    30, 'female');
+('Emory',  NULL,  24, 'female'),
+('Adwina',  'Roberts',    43, 'female');
 
 
 
@@ -623,12 +667,12 @@ INSERT INTO npc_persona (
 )
 VALUES (
   (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwina'),
-  'Artist, Actor, Athlete, religious, follows the law strictly',
+  'One-leg, Actor, Athlete, religious, follows the law strictly',
   'Creative, shy, earnest, enthusiastic, sensitive, easily overwhelmed, kind-hearted',
   'Responds strongly to encouragement and praise; becomes anxious when rushed or confronted; avoids conflict and seeks help when stressed',
   1.25,
   'sounds nervous when overwhelmed',
-  'Well-meaning and cooperative, but may have ulterior motives.'
+  'Well-meaning but supsicious of intentions of others.'
 );
 
 -- background info for Adwin
@@ -636,26 +680,6 @@ INSERT INTO background (idNPC, BGcontent)
 VALUES (
   (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwina'),
   'You are Adwina Roberts. You love the arts, working out, and competing in athletics.'
-);
-
-
-INSERT INTO npc_persona (
-  idNPC,
-  role,
-  personality_traits,
-  emotional_tendencies,
-  emotion_reactivity,
-  speech_style,
-  moral_alignment
-)
-VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Elara'),
-  'University ethics professor, former investigative journalist',
-  'Intelligent, perceptive, composed, dry-witted, guarded, principled, quietly competitive',
-  'Slow to anger but intensely reactive to hypocrisy or betrayal; becomes emotionally distant under stress; softens when intellectually respected',
-  1.15,
-  'Measured and articulate; voice tightens slightly when irritated; uses subtle irony rather than overt sarcasm',
-  'Deeply values justice and integrity, but carries guilt about a past compromise.'
 );
 
 

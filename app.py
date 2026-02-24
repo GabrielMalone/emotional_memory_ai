@@ -10,7 +10,11 @@ from flask_socketio import SocketIO, join_room
 import base64
 import hashlib
 import logging
+#------------------------------------------------------------------
+from threading import Thread
+from threading import Lock
 
+#------------------------------------------------------------------
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
@@ -18,6 +22,7 @@ AUDIO_DIR = "./tts_cache"
 os.makedirs(AUDIO_DIR, exist_ok=True)
 speechOn = False  # set to false to save 11 lab tokens
 
+memory_worker_lock = Lock()
 #------------------------------------------------------------------
 # we need to have this API sit between Unreal and MYSQL Database
 #------------------------------------------------------------------
@@ -79,7 +84,7 @@ def saveAudio(audio):
 #------------------------------------------------------------------
 # NPC INTERACT -- STREAM NPC OUTPUT AND UPDATE KB 
 #------------------------------------------------------------------
-@camo.route("/npc_interact", methods=["POST"])  
+@camo.route("/npc_interact", methods=["POST"])
 def npc_interact():
     SENTENCE_END = {".", "?", "!"}
 
@@ -94,89 +99,84 @@ def npc_interact():
 
         print(f"\nDATA: {data}\n")
 
-        # update mem on what player just said
-
-        update_NPC_user_memory_query(
-            idNPC=idNPC,
-            idUser=idUser,
-            kbText=pText
-        )
-
         # ----------------------------------------------------------
-        # decay emotions before applying new stimulus
+        # 1. Decay existing emotions
         # ----------------------------------------------------------
         decay_rate = get_emotion_decay_rate(idNPC)
         decay_npc_emotions(idNPC=idNPC, decay=decay_rate)
 
         # ----------------------------------------------------------
-        # classify player input
+        # 2. Classify player input
         # ----------------------------------------------------------
         raw_mem = get_mem(idNPC=idNPC, idUser=idUser)
-        cls_mem = openAIqueries.build_classification_context(raw_mem, 6)
 
         classification = openAIqueries.classify_player_input(
-            data["playerText"], raw_mem, client, idNPC, idUser
+            pText,
+            raw_mem,
+            client,
+            idNPC,
+            idUser
         )
 
-        trust_delta  = classification["trust_delta"]
-        offensive    = classification["offensive"]
+        trust_delta = classification["trust_delta"]
+        offensive   = classification["offensive"]
 
-        # update NPC mem about this classification ? 
-
-        kbText = f"[Player {pName}'s last statement {pText} was classified as:] {classification}"
-        update_NPC_user_memory_query(
-            idNPC=idNPC,
-            idUser=idUser,
-            kbText=kbText
-        )
-
-        print(f"\nNPC MEM UPDATE: {kbText}\n")
-
-        # update trust from player's last output
-
+        # ----------------------------------------------------------
+        # 3. Update trust
+        # ----------------------------------------------------------
         update_trust(idUser, idNPC, trust_delta)
 
         if offensive:
-            update_NPC_user_memory_query(
-                idNPC=idNPC,
-                idUser=idUser,
-                kbText="[player spoke offensively or disrespectfully]"
-            )
             update_trust(idUser, idNPC, -50)
-        
 
-        # extract npcs's beliefs about player based on this last output from player
-
+        # ----------------------------------------------------------
+        # 4. Extract beliefs about player
+        # ----------------------------------------------------------
         beliefs = openAIqueries.extract_persona_clues(
             player_text=pText,
-            recent_context=cls_mem,
+            recent_context=raw_mem,
             client=client,
             idNPC=idNPC,
             idUser=idUser
         )
-
-        print(f"\nEXTRACTED BELIEFS: {beliefs}\n")
 
         update_npc_user_beliefs(
             idNPC=idNPC,
             idUser=idUser,
             persona_data=beliefs
         )
- 
-        # ----------------------------------------------------------
 
+        # Insert player turn immediately so prompt can see it
+
+        #should include extracted beliefs about player int this update, oops
+        insert_memory_buffer(
+            idNPC=idNPC,
+            idUser=idUser,
+            playerText=pText,
+            npcText=None,
+            npcEmotion=None,
+            npcIntensity=None,
+            selfBeliefs=None,
+            playerBeliefs=beliefs,
+            playerOutputClassifiedAs=classification
+        )
+
+        # ----------------------------------------------------------
+        # 6. Build prompt using updated memory - NPC OUTPUT
+        # ----------------------------------------------------------
         prompt = build_prompt(idUser=idUser, idNPC=idNPC)
+
+        # ----------------------------------------------------------
+        # 6a. Stream Output w/ audio (get emotion for flavor)
+        # ----------------------------------------------------------
 
         full_text = []
         sentence_buffer = ""
         speaking_emitted = False
 
-        # ----------------------------------------------------------
-        # stream text + audio
-        # ----------------------------------------------------------
         db = connect()
         cursor = db.cursor(dictionary=True)
-        # all emotions
+
         cursor.execute("""
             SELECT e.emotion, ne.emotionIntensity
             FROM npcEmotion ne
@@ -187,6 +187,8 @@ def npc_interact():
         emotions = cursor.fetchall()
 
         dominant = emotions[0] if emotions else None
+        cursor.close()
+        db.close()
 
 
         for token in openAIqueries.getResponseStream(
@@ -228,9 +230,7 @@ def npc_interact():
 
                 sentence_buffer = ""
 
-        # ----------------------------------------------------------
-        # flush remaining text
-        # ----------------------------------------------------------
+        # Flush remaining audio
         if speechOn and sentence_buffer.strip():
             if not speaking_emitted:
                 socketio.emit(
@@ -238,7 +238,6 @@ def npc_interact():
                     {"idNPC": idNPC, "state": True},
                     room=f"user:{idUser}"
                 )
-                speaking_emitted = True
 
             for audio_chunk in tts_cached(
                 sentence_buffer, idVoice, dominant
@@ -251,43 +250,73 @@ def npc_interact():
                 )
                 socketio.sleep(0)
 
-    
+        # ----------------------------------------------------------
+        # 8. Final NPC response text
+        # ----------------------------------------------------------
+        npc_text = "".join(full_text)
+        print(f"\nNPC RESPONSE: {npc_text}\n")
 
         # ----------------------------------------------------------
-        # update KB with NPC response
+        # 9. Classify NPC emotional reaction
         # ----------------------------------------------------------
-        text = "".join(full_text)
-        kbText = f"[You just responded to {pName} with:] '{text}'"
-
-        print(f"\nNPC RESPONSE: {kbText}\n")
-
-        update_NPC_user_memory_query(
-            idNPC=idNPC,
-            idUser=idUser,
-            kbText=kbText
+        emotion_data = openAIqueries.classify_npc_reaction(
+            pText,
+            npc_text,
+            idNPC,
+            idUser,
+            client
         )
 
-        emotion_data = openAIqueries.classify_npc_reaction(pText, text, idNPC, idUser, client)
-        reactivity = get_emotion_reactivity(idNPC)
-        emotion_name = emotion_data["emotion"]
         base_intensity = emotion_data["intensity"]
-
         reactivity = get_emotion_reactivity(idNPC)
         intensity = min(1.0, base_intensity * reactivity)
 
-        set_npc_emotion(idNPC, emotion_name, intensity)
-
-        updated_mem = get_mem(idNPC=idNPC, idUser=idUser)
-        classification = openAIqueries.classify_player_input(
-            data["playerText"], updated_mem, client, idNPC, idUser
-        )
-
-        self_beliefs = openAIqueries.extract_self_beliefs(text, classification, client, idNPC)
-        openAIqueries.merge_self_beliefs(idNPC, self_beliefs["beliefs"])
-  
+        set_npc_emotion(idNPC, emotion_data["emotion"], intensity)
 
         # ----------------------------------------------------------
-        # done sending
+        # 10. Extract and merge self beliefs
+        # ----------------------------------------------------------
+        raw_mem = get_mem(idUser=idUser, idNPC=idNPC)
+        latest_scene = openAIqueries.get_most_recent_scene(raw_mem)
+        recent_convo = get_buffered_convo(idUser=idUser, idNPC=idNPC)
+
+        latest_scene = latest_scene[0] if isinstance(latest_scene, tuple) else latest_scene
+        recent_convo = recent_convo or ""
+        latest_scene = latest_scene or ""
+
+        self_beliefs = openAIqueries.extract_self_beliefs(
+            npc_text,
+            latest_scene + "\n" + recent_convo,
+            client,
+            idNPC
+        )
+
+        openAIqueries.merge_self_beliefs(
+            idNPC,
+            self_beliefs["beliefs"]
+        )
+
+        # ----------------------------------------------------------
+        # 11. UPDATE MEMORY WITH NPC TURN (SECOND PHASE)
+        # ----------------------------------------------------------
+        insert_memory_buffer(
+            idNPC=idNPC,
+            idUser=idUser,
+            playerText=None,
+            npcText=npc_text,
+            npcEmotion=emotion_data.get("emotion"),
+            npcIntensity=round(emotion_data.get("intensity", 0), 2),
+            selfBeliefs=self_beliefs.get("beliefs")
+        )
+        # Trigger structured memory consolidation asynchronously
+        Thread(
+            target=background_update_structured_kbtext,
+            args=(idNPC, idUser),
+            daemon=True
+        ).start()
+
+        # ----------------------------------------------------------
+        # 12. Emit final state
         # ----------------------------------------------------------
         socketio.emit("npc_text_done", {}, room=f"user:{idUser}")
         socketio.emit("npc_audio_done", {}, room=f"user:{idUser}")
@@ -299,9 +328,118 @@ def npc_interact():
         import traceback
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
-           
-
 
 #------------------------------------------------------------------
+def background_update_structured_kbtext(idNPC: int, idUser: int):
+    """
+    Continuously processes unprocessed exchanges
+    until none remain.
+    """
+
+    # Prevent multiple workers running simultaneously
+    if not memory_worker_lock.acquire(blocking=False):
+        return  # Another worker is already running
+
+    try:
+        while True:
+            processed = process_one_exchange(idNPC, idUser)
+            if not processed:
+                break  # No more exchanges left
+    finally:
+        memory_worker_lock.release()
+#------------------------------------------------------------------
+def process_one_exchange(idNPC: int, idUser: int) -> bool:
+    print(f"\n[MEMORY WORKER] Updating memory for NPC {idNPC}, User {idUser}")
+
+    db = connect()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT *
+        FROM npc_user_memory_buffer
+        WHERE idNPC = %s
+          AND idUser = %s
+          AND processed = 0
+        ORDER BY createdAt ASC
+    """, (idNPC, idUser))
+
+    rows = cursor.fetchall()
+
+    if not rows:
+        cursor.close()
+        db.close()
+        return False  # nothing to process
+
+    player_text = None
+    npc_text = None
+    npc_emotion = None
+    npc_intensity = None
+    buffer_ids = []
+
+    for r in rows:
+
+        if r.get("playerText") and player_text is None:
+            player_text = r["playerText"]
+            buffer_ids.append(r["idBuffer"])
+            continue
+
+        if r.get("npcText") and player_text is not None:
+            npc_text = r["npcText"]
+            npc_emotion = r.get("npcEmotion")
+            npc_intensity = r.get("npcIntensity")
+            buffer_ids.append(r["idBuffer"])
+            break
+
+    if not player_text or not npc_text:
+        cursor.close()
+        db.close()
+        return False  # incomplete exchange
+
+    kbtext_current = get_mem(idNPC=idNPC, idUser=idUser)
+
+    relevant_self_beliefs = get_self_beliefs_snapshot(idNPC)
+    relevant_player_beliefs = get_player_beliefs_snapshot(idNPC, idUser)
+
+    updated_kb = openAIqueries.update_structured_kbtext(
+        client=None,
+        idUser=idUser,
+        idNPC=idNPC,
+        kbtext_current=kbtext_current,
+        player_text=player_text,
+        npc_text=npc_text,
+        player_cls=None,
+        npc_reaction={
+            "emotion": npc_emotion,
+            "intensity": npc_intensity
+        },
+        relevant_self_beliefs=relevant_self_beliefs,
+        relevant_player_beliefs=relevant_player_beliefs,
+    )
+
+    overwrite_NPC_user_memory(
+        idNPC=idNPC,
+        idUser=idUser,
+        kbText=updated_kb
+    )
+
+    placeholders = ",".join(["%s"] * len(buffer_ids))
+
+    cursor.execute(f"""
+        UPDATE npc_user_memory_buffer
+        SET processed = 1,
+            processedAt = NOW()
+        WHERE idBuffer IN ({placeholders})
+    """, tuple(buffer_ids))
+
+    db.commit()
+    cursor.close()
+    db.close()
+
+    print(f"[MEMORY WORKER] Processed exchange for User {player_text} \n NPC {npc_text}")
+
+    return True  # successfully processed
+
+
 if __name__ == "__main__":
+
     socketio.run(camo, host="0.0.0.0", port=5001, debug=False, use_reloader=True)

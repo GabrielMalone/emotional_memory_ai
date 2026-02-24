@@ -6,6 +6,28 @@ import ast
 import os
 import mysql.connector
 from datetime import datetime, timezone
+import phase_2_queries
+import re
+
+
+def get_ollama_client():
+    return OpenAI(
+        base_url="http://100.91.71.61:11434/v1",
+        api_key="ollama"  # dummy value required by SDK
+    )
+
+def get_deepseek_client():
+    return OpenAI(
+        api_key=os.getenv("DEEPSEEK_API_KEY"),
+        base_url="https://api.deepseek.com/v1"
+    )
+
+def get_xai_client():
+    return OpenAI(
+        api_key=os.getenv("XAI_API_KEY"),
+        base_url="https://api.x.ai/v1"
+    )
+
 #------------------------------------------------------------------
 def connect()->object:
     return mysql.connector.connect(
@@ -15,9 +37,10 @@ def connect()->object:
         host=os.getenv('DB_HOST', 'localhost') )
 #------------------------------------------------------------------
 def getResponseStream(prompt, current_scene, player_name, client):
+    client = get_deepseek_client()
     try:
         response = client.chat.completions.create(
-            model="gpt-4.1",
+            model="deepseek-chat",
             temperature=0.85,
             top_p=0.9,
             stream=True, 
@@ -56,19 +79,42 @@ def getResponseStream(prompt, current_scene, player_name, client):
         print("ERROR:", e)
 #------------------------------------------------------------------
 def classify_player_input(player_text: str, raw_mem: str, client, idNPC: int, idUser: int):
+    client = get_deepseek_client()
 
     print(f"\nCLASSIFIER INPUT: {player_text}\n")
 
     # -----------------------------------
     # Build memory context
     # -----------------------------------
-    mem_context = build_classification_context(raw_mem)
+    mem_context = get_most_recent_scene(raw_mem)
+    db = connect()
+    cursor = db.cursor(dictionary=True)
+    # -----------------------------------
+    # Fetch rcent dialogue
+    # -----------------------------------
+    cursor.execute("""
+            SELECT playerText, npcText
+            FROM npc_user_memory_buffer
+            WHERE idNPC = %s
+            AND idUser = %s
+            AND processed = 0
+            ORDER BY createdAt ASC
+        """, (idNPC, idUser))
 
+    rows = cursor.fetchall()
+
+    recent_dialogue_lines = []
+
+    for r in rows:
+        if r.get("playerText"):
+            recent_dialogue_lines.append(f"Player: {r['playerText']}")
+        if r.get("npcText"):
+            recent_dialogue_lines.append(f"You: {r['npcText']}")
+
+    recent_dialogue = "\n".join(recent_dialogue_lines)
     # -----------------------------------
     # Fetch NPC persona + beliefs
     # -----------------------------------
-    db = connect()
-    cursor = db.cursor(dictionary=True)
 
     cursor.execute("""
         SELECT p.personality_traits,
@@ -159,8 +205,8 @@ def classify_player_input(player_text: str, raw_mem: str, client, idNPC: int, id
     Do NOT invent new labels.
     """
 
-    if mem_context and "recent_summary" in mem_context:
-        system += f"\nRecent interaction summary:\n{mem_context['recent_summary']}\n"
+
+    system += f"\nRecent interaction summary:\n{mem_context}\n\n{recent_dialogue}\n"
 
     # -----------------------------------
     # USER MESSAGE
@@ -170,6 +216,7 @@ def classify_player_input(player_text: str, raw_mem: str, client, idNPC: int, id
     \"\"\"{player_text}\"\"\"
 
     IMPORTANT:
+
     Determine whether the emotional tone is directed at:
     - the NPC
     - the player themself
@@ -188,7 +235,7 @@ def classify_player_input(player_text: str, raw_mem: str, client, idNPC: int, id
     """
 
     resp = client.chat.completions.create(
-        model="gpt-4.1",
+        model="deepseek-chat",
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -196,7 +243,17 @@ def classify_player_input(player_text: str, raw_mem: str, client, idNPC: int, id
         temperature=0.0,
     )
 
-    result = json.loads(resp.choices[0].message.content)
+    result = _safe_json_from_model(
+        resp,
+        fallback={
+            "sentiment": "neutral",
+            "intensity": 0.3,
+            "offensive": False,
+            "emotion": "calm",
+            "target": "none",
+            "trust_delta": 0
+        }
+    )
 
     # ----------------------------
     # TRUST ENGINE (deterministic)
@@ -238,9 +295,12 @@ def classify_player_input(player_text: str, raw_mem: str, client, idNPC: int, id
     record_classification_stats(idUser, idNPC, player_text, result)
 
 
+    print(f"\nPLAYER INPUT CLASSIFIED:\n\{result}n")
+
     return result
 #------------------------------------------------------------------
 def extract_persona_clues(player_text: str, recent_context: dict, client, idNPC, idUser):
+    client = get_deepseek_client()
 
     system = ""
 
@@ -340,6 +400,7 @@ def extract_persona_clues(player_text: str, recent_context: dict, client, idNPC,
         """
 
     system += f"""
+
         You are simulating how THIS NPC forms beliefs about a player.
 
         NPC PROFILE
@@ -363,13 +424,16 @@ def extract_persona_clues(player_text: str, recent_context: dict, client, idNPC,
         - Do NOT reason as an omniscient narrator.
 
         Return ONLY valid JSON.
+        
         """
 
-    if recent_context and "recent_summary" in recent_context:
-        system += (
-            "\nRecent interaction summary (may provide behavioral patterns):\n"
-            f"{recent_context['recent_summary']}\n"
-        )
+    past_memory, current_scene, _ = get_most_recent_scene(recent_context or "")
+
+   
+    system += (
+        "\nRecent interaction summary (may provide behavioral patterns):\n"
+        f"{current_scene}\n"
+    )
 
     user = f"""
     Player text:
@@ -446,7 +510,7 @@ def extract_persona_clues(player_text: str, recent_context: dict, client, idNPC,
     """
 
     resp = client.chat.completions.create(
-        model="gpt-4.1",
+        model="deepseek-chat",
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -454,24 +518,21 @@ def extract_persona_clues(player_text: str, recent_context: dict, client, idNPC,
         temperature=0.0,
     )
 
-    # ------------------------------
-    # Safe JSON parsing
-    # ------------------------------
-    try:
-        result = json.loads(resp.choices[0].message.content)
-    except Exception:
-        return {
-            "current_emotion": None,
-            "moral_alignment": None,
-            "age": None,
-            "gender": None,
-            "life_story": None,
-            "personality_traits": [],
-            "secrets": [],
-            "goals": [],
-            "likes": [],
-            "dislikes": []
-        }
+    result = _safe_json_from_model(
+    resp,
+    fallback={
+        "current_emotion": None,
+        "moral_alignment": None,
+        "age": None,
+        "gender": None,
+        "life_story": None,
+        "personality_traits": [],
+        "secrets": [],
+        "goals": [],
+        "likes": [],
+        "dislikes": []
+    }
+    )
 
     # ------------------------------
     # Safety normalization
@@ -527,6 +588,7 @@ def canonicalize(value: str) -> str:
 
 #------------------------------------------------------------------
 def extract_self_beliefs(npc_output: str, recent_context: dict, client, idNPC: int):
+    client = get_deepseek_client()
 
     db = connect()
     cursor = db.cursor(dictionary=True)
@@ -663,8 +725,8 @@ def extract_self_beliefs(npc_output: str, recent_context: dict, client, idNPC: i
 
         """
 
-    if recent_context and "recent_summary" in recent_context:
-        system += f"\nRecent interaction summary:\n{recent_context['recent_summary']}\n"
+
+    system += f"\nRecent interaction summary:\n{recent_context}\n"
 
     user = f"""
         NPC spoken text:
@@ -708,7 +770,7 @@ def extract_self_beliefs(npc_output: str, recent_context: dict, client, idNPC: i
         """
 
     resp = client.chat.completions.create(
-        model="gpt-4.1",
+        model="deepseek-chat",
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -716,14 +778,10 @@ def extract_self_beliefs(npc_output: str, recent_context: dict, client, idNPC: i
         temperature=0.0,
     )
 
-    # ----------------------------------------
-    # Safe JSON parsing
-    # ----------------------------------------
-
-    try:
-        result = json.loads(resp.choices[0].message.content)
-    except Exception:
-        return {"beliefs": []}
+    result = _safe_json_from_model(
+        resp,
+        fallback={"beliefs": []}
+    )
     
     ALLOWED_SELF_TYPES = {
         "age",
@@ -933,6 +991,7 @@ VALID_EMOTIONS = {
 }
 
 def classify_npc_reaction(player_text, npc_output, idNPC, idUser, client):
+    client = get_deepseek_client()
 
     db = connect()
     cursor = db.cursor(dictionary=True)
@@ -991,17 +1050,14 @@ def classify_npc_reaction(player_text, npc_output, idNPC, idUser, client):
 
     try:
         resp = client.chat.completions.create(
-            model="gpt-4.1",
+            model="deepseek-chat",
             temperature=0.0,
-            response_format={"type": "json_object"},  # 🔒 Force JSON mode
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user}
             ]
         )
-
-        raw = resp.choices[0].message.content
-        data = json.loads(raw)
+        data = _safe_json_from_model(resp, fallback={"emotion": "calm", "intensity": 0.3})
 
     except Exception:
         # Absolute safe fallback
@@ -1083,3 +1139,348 @@ def normalize_list_field(lst):
         })
 
     return cleaned
+
+
+
+MEMORY_SCHEMA_INSTRUCTIONS = """
+    You maintain the NPC's long-term memory document (kbText).
+    This memory is SUBJECTIVE: it is filtered through the NPC's perceptions, biases, and current emotional state.
+    However, you must preserve factual dialogue content verbatim inside quotes.
+
+    CRITICAL OUTPUT RULES:
+    - Output ONLY the updated memory document (no JSON, no commentary).
+    - Preserve the exact document format shown below.
+    - Never remove or alter any episode with Intensity >= 0.95 (hard preserve).
+    - keep the scene header and scene peak intensity
+    - Never break or rename keys/labels.
+    Episode Numbering Rules:
+    - Episodes must be numbered sequentially within each scene.
+    - When adding new episodes, continue numbering from the last episode number in that scene.
+    - "Responding to" must reference the correct episode number.
+
+    DOCUMENT FORMAT (MUST MATCH):
+    === SCENE: <scene_tag> ===
+    Where: ...
+    When: ...
+    How we got here: ...
+    NPC lens: ...
+
+    Relevant beliefs in play (NPC about self):
+    - <beliefType>: <beliefValue> (conf <x.xx>)
+    Relevant beliefs in play (NPC about player):
+    - <beliefType>: <beliefValue> (conf <x.xx>)
+
+    EPISODES (in order)
+    [1]
+    Speaker: player|npc
+    Said: "<verbatim>"
+    Responding to: none|[N]
+    Player felt (as I read it): <emotion> (<intensity>)         # only when Speaker=player
+    How I felt hearing it: <emotion> (<intensity>)              # only when Speaker=player
+    I felt speaking: <emotion> (<intensity>)                    # only when Speaker=npc
+    I thought player felt: <emotion> (<intensity>)              # only when Speaker=npc
+    Intensity: <0.00-1.00>
+    Notes (my bias): <short subjective line>
+
+    Scene peak intensity: <0.00-1.00>
+    --- END SCENE ---
+
+    If compression occurs within a scene, structure it like this:
+
+    EPISODES (compressed)
+    - <bullet summary line>
+    - <bullet summary line>
+
+    EPISODES (in order)
+    [most recent episodes continue here]
+
+    """
+
+def clamp01(x: float) -> float:
+    try:
+        x = float(x)
+    except Exception:
+        return 0.5
+    return max(0.0, min(1.0, x))
+
+def format_beliefs_for_prompt(rows, label: str, min_conf=0.6, max_items=12):
+    """
+    rows: list of dicts like {beliefType, beliefValue, confidence}
+    """
+    if not rows:
+        return f"{label}: (none)\n"
+    # filter + sort
+    filtered = [r for r in rows if float(r.get("confidence", 0)) >= min_conf]
+    filtered.sort(key=lambda r: float(r.get("confidence", 0)), reverse=True)
+    filtered = filtered[:max_items]
+    out = f"{label}:\n"
+    for r in filtered:
+        out += f"- {r.get('beliefType')}: {r.get('beliefValue')} (conf {round(float(r.get('confidence',0)),2)})\n"
+    return out
+
+def update_structured_kbtext(
+    *,
+    client,
+    idUser: int,
+    idNPC: int,
+    kbtext_current: str,
+    player_text: str | None,
+    npc_text: str | None,
+    player_cls: dict | None,
+    npc_reaction: dict | None,
+    relevant_self_beliefs: list,
+    relevant_player_beliefs: list,
+    max_chars: int = 12000
+) -> str:
+    """
+    LLM-determined scene structuring.
+    Returns updated kbText.
+    """
+    client = get_deepseek_client()
+
+    print(f"\nUPDATING KB\n")
+
+    past_memory, current_scene, _ = get_most_recent_scene(kbtext_current or "")
+
+    scene_for_llm = current_scene or "EMPTY"
+
+    episode_count = scene_for_llm.count("\n[")
+    should_compress_scene = episode_count >= 5
+
+
+    compression_instruction = ""
+    if should_compress_scene:
+
+        print("\nCOMPRESSING SCENE\n")
+
+        compression_instruction = """
+        The current scene has grown long.
+        Compress older low-intensity episodes within THIS SCENE.
+        Keep the 5 most recent episodes fully detailed.
+        Preserve any episode with Intensity >= 0.95.
+        Replace older compressed episodes with a short bullet summary under:
+        EPISODES (compressed)
+    """
+
+    # --------------------------------------------------
+    # Fetch trust + relationship state
+    # --------------------------------------------------
+    db = connect()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT trust, wasEnemy
+        FROM playerNPCrelationship
+        WHERE idNPC = %s AND idUser = %s
+    """, (idNPC, idUser))
+
+    rel = cursor.fetchone()
+
+    trust = rel["trust"] if rel else 50
+    was_enemy = rel["wasEnemy"] if rel else 0
+
+    relationship_type = phase_2_queries.determine_relationship_label(trust)
+
+    if was_enemy:
+        relationship_type = "former_enemy"
+
+    # --------------------------------------------------
+    # Emotional context
+    # --------------------------------------------------
+    perceived_player_emotion = (player_cls or {}).get("emotion", "calm")
+    perceived_player_intensity = clamp01((player_cls or {}).get("intensity", 0.3))
+
+    npc_emotion = (npc_reaction or {}).get("emotion", "calm")
+    npc_intensity = clamp01((npc_reaction or {}).get("intensity", 0.3))
+
+    episode_intensity = clamp01(max(perceived_player_intensity, npc_intensity))
+
+    # --------------------------------------------------
+    # Belief formatting
+    # --------------------------------------------------
+    self_belief_text = format_beliefs_for_prompt(
+        relevant_self_beliefs,
+        "SELF BELIEFS (candidate)",
+        min_conf=0.6
+    )
+
+    player_belief_text = format_beliefs_for_prompt(
+        relevant_player_beliefs,
+        "PLAYER BELIEFS (candidate)",
+        min_conf=0.6
+    )
+
+    # --------------------------------------------------
+    # System Prompt
+    # --------------------------------------------------
+    system = f"""
+    {MEMORY_SCHEMA_INSTRUCTIONS}
+
+    SCENE CREATION POLICY (STRICT)
+
+    A SCENE represents a single continuous activity in a single primary setting.
+
+    You MUST create a NEW SCENE when ANY of the following occur:
+
+    1. A meaningful physical location change
+
+    2. A completed activity transitions into a new activity
+
+    3. A clear time shift
+
+    4. A tone reset or interaction shift
+
+    5. A narrative beat that feels like a “chapter break.”
+
+    DO NOT treat large setting transitions as continuation.
+    If unsure, prefer creating a NEW SCENE rather than extending the old one.
+
+    When creating a new scene:
+    - Generate a new scene tag.
+    - Reset episode numbering starting from [1].
+    - Recalculate Scene peak intensity from episodes within that scene only.
+    - Do NOT carry forward EPISODES (compressed) from previous scene.
+    - Keep past scenes intact and append the new scene after them.
+
+    Subjective Memory Rules:
+    - Memory is filtered through the NPC's perception.
+    - Dialogue must remain verbatim inside quotes.
+    - Interpret emotions and motivations according to trust and personality.
+    - Notes (my bias) should reflect emotion + beliefs.
+    - Include only beliefs directly influencing this moment (max 6 each).
+
+    RELATIONSHIP CONTEXT
+    --------------------
+    Relationship type: {relationship_type}
+    Trust level: {trust} (0 = hostile, 50 = neutral, 100 = deeply trusting)
+
+    High trust → generous interpretation.
+    Low trust → guarded or suspicious interpretation.
+
+    New episode intensity: {round(episode_intensity, 2)}
+
+    If CURRENT SCENE is "EMPTY", create a new scene from scratch using the required format.
+
+    {compression_instruction}
+    """
+
+    # --------------------------------------------------
+    # User Prompt
+    # --------------------------------------------------
+    user = f"""
+        CURRENT SCENE:
+        \"\"\"{scene_for_llm}\"\"\"
+
+        NEW TURN DATA:
+
+        Player said:
+        \"\"\"{player_text or ""}\"\"\"
+
+        Player classifier:
+        {json.dumps(player_cls or {}, ensure_ascii=False)}
+
+        NPC responded:
+        \"\"\"{npc_text or ""}\"\"\"
+
+        NPC reaction:
+        {json.dumps(npc_reaction or {}, ensure_ascii=False)}
+
+        Candidate beliefs:
+        {self_belief_text}
+        {player_belief_text}
+
+        Update the scene document.
+        """
+
+    # --------------------------------------------------
+    # LLM Call
+    # --------------------------------------------------
+    resp = client.chat.completions.create(
+        model="deepseek-reasoner",
+        temperature=0.0,
+        messages=[
+            {"role": "system", "content": system.strip()},
+            {"role": "user", "content": user.strip()},
+        ],
+    )
+
+    updated = (resp.choices[0].message.content or "").strip()
+
+    # --------------------------------------------------
+    # Structural Guard
+    # --------------------------------------------------
+    if "=== SCENE:" not in updated or "--- END SCENE ---" not in updated:
+        safe = kbtext_current or ""
+        if player_text:
+            safe += f"\n\n[{datetime.now()}] Player: {player_text}"
+        if npc_text:
+            safe += f"\n[{datetime.now()}] NPC: {npc_text}"
+        return safe
+    
+    # --------------------------------------------------
+    # Reassemble Full Memory (past + updated scene)
+    # --------------------------------------------------
+
+    if past_memory:
+        final_memory = past_memory.rstrip() + "\n\n" + updated
+    else:
+        final_memory = updated
+
+    # print(f"\nUPDATED MEM: {final_memory}\n")
+
+    return final_memory
+
+# --------------------------------------------------
+def _safe_json_from_model(resp, fallback: dict):
+    """
+    Robust JSON extraction for DeepSeek-style outputs.
+    - strips markdown fences
+    - extracts first {...} block if model adds extra text
+    """
+    try:
+        raw = (resp.choices[0].message.content or "").strip()
+        if not raw:
+            return fallback
+
+        # Strip markdown fences ```json ... ```
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            if len(parts) >= 2:
+                raw = parts[1].strip()
+
+        # If the model added extra text, extract the first JSON object
+        first = raw.find("{")
+        last = raw.rfind("}")
+        if first != -1 and last != -1 and last > first:
+            raw = raw[first:last + 1]
+
+        return json.loads(raw)
+
+    except Exception:
+        print("JSON parse failure. Raw output:", (resp.choices[0].message.content or "")[:500])
+        return fallback
+
+
+# --------------------------------------------------
+import re
+
+def get_most_recent_scene(kbtext: str):
+    if not kbtext:
+        return None, None, None
+
+    pattern = r"(?ms)^=== SCENE:.*?^--- END SCENE ---\s*"
+    scenes = list(re.finditer(pattern, kbtext))
+
+    if not scenes:
+        # No structured scene exists yet
+        return None, None, kbtext.strip()
+
+    last_match = scenes[-1]
+
+    last_scene = last_match.group()
+    scene_end_index = last_match.end()
+
+    past_memory = kbtext[:last_match.start()]
+    raw_buffer = kbtext[scene_end_index:]
+
+    return past_memory.strip(), last_scene.strip(), raw_buffer.strip()
