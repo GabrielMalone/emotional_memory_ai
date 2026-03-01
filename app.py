@@ -13,7 +13,6 @@ import logging
 #------------------------------------------------------------------
 from threading import Thread
 from threading import Lock
-
 #------------------------------------------------------------------
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)

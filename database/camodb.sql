@@ -286,8 +286,8 @@ CREATE TABLE IF NOT EXISTS `camodb`.`npc_user_memory_buffer` (
   `idNPC` INT NOT NULL,
   `idUser` INT NOT NULL,
 
-  `playerText` TEXT NULL,
-  `npcText` MEDIUMTEXT NULL,
+  `playerText` LONGTEXT NULL,
+  `npcText` LONGTEXT NULL,
 
   `npcEmotion` VARCHAR(64) NULL,
   `npcIntensity` FLOAT NULL,
@@ -327,7 +327,7 @@ DEFAULT CHARACTER SET = utf8mb4;
 -- -----------------------------------------------------
 CREATE TABLE IF NOT EXISTS `camodb`.`background` (
   `idNPC` INT NOT NULL,
-  `BGcontent` MEDIUMTEXT NOT NULL,
+  `BGcontent` LONGTEXT NOT NULL,
   PRIMARY KEY (`idNPC`),
   INDEX `fk_background_NPC1_idx` (`idNPC` ASC) VISIBLE,
   CONSTRAINT `fk_background_NPC1`
@@ -544,7 +544,7 @@ CREATE TABLE npc_user_belief (
 
   confidence FLOAT NOT NULL DEFAULT 0.5,
 
-  evidence TEXT NULL,
+  evidence LONGTEXT NULL,
 
   updatedAt DATETIME NOT NULL
     DEFAULT CURRENT_TIMESTAMP
@@ -572,7 +572,7 @@ CREATE TABLE player_input_classification_log (
     idUser INT NOT NULL,
     idNPC INT NOT NULL,
 
-    playerText TEXT NOT NULL,
+    playerText LONGTEXT NOT NULL,
 
     sentiment VARCHAR(50),
     intensity FLOAT DEFAULT 0.0,
@@ -604,7 +604,7 @@ CREATE TABLE npc_self_belief (
   confidence FLOAT NOT NULL DEFAULT 0.5,
   stability FLOAT NOT NULL DEFAULT 0.7,
 
-  evidence TEXT NULL,
+  evidence LONGTEXT NULL,
 
   createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updatedAt DATETIME NOT NULL
@@ -651,11 +651,20 @@ VALUES
 INSERT INTO NPC
 (nameFirst, nameLast, age, gender)
 VALUES
-('Emory',  NULL,  24, 'female'),
-('Adwina',  'Roberts',    43, 'female');
+('Emory',  NULL,  24, 'female');
+
+-- =========================================
+-- INSERT: NPC
+-- =========================================
+INSERT INTO NPC
+(nameFirst, nameLast, age, gender)
+VALUES
+('Elara', 'Vance', 42, 'female');
 
 
-
+-- =========================================
+-- INSERT: Persona
+-- =========================================
 INSERT INTO npc_persona (
   idNPC,
   role,
@@ -666,21 +675,61 @@ INSERT INTO npc_persona (
   moral_alignment
 )
 VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwina'),
-  'One-leg, Actor, Athlete, religious, follows the law strictly',
-  'Creative, shy, earnest, enthusiastic, sensitive, easily overwhelmed, kind-hearted',
-  'Responds strongly to encouragement and praise; becomes anxious when rushed or confronted; avoids conflict and seeks help when stressed',
-  1.25,
-  'sounds nervous when overwhelmed',
-  'Well-meaning but supsicious of intentions of others.'
+  (SELECT idNPC FROM NPC WHERE nameFirst = 'Elara'),
+  'Clinical psychologist and ethics consultant',
+  'observant, restrained, analytical, quietly judgmental, deeply loyal once trust is earned',
+  'Rarely shows anger directly; suppresses emotion until threshold is exceeded; reacts intensely to betrayal or moral hypocrisy',
+  1.4,
+  'measured, calm, precise wording, occasionally probing',
+  'Believes in moral accountability above personal loyalty'
 );
 
--- background info for Adwin
+
+-- =========================================
+-- INSERT: Background
+-- =========================================
 INSERT INTO background (idNPC, BGcontent)
 VALUES (
-  (SELECT idNPC FROM NPC WHERE nameFirst = 'Adwina'),
-  'You are Adwina Roberts. You love the arts, working out, and competing in athletics.'
+  (SELECT idNPC FROM NPC WHERE nameFirst = 'Elara'),
+  'You are Dr. Elara Vance. You are a clinical psychologist who studies moral injury and betrayal.
+You NEVER reveal personal details during during your therapy sessions.
+Ten years ago, someone you trusted betrayed you professionally, costing you your research career.
+You now test people subtly to see if they are consistent, honest, and morally grounded.
+You dislike overt emotional displays and distrust flattery.
+You remember contradictions. You have an older sister with whom you are not close because you are jealous of her success.
+This face embarasses you.'
 );
+
+
+-- =========================================
+-- INSERT: Initial Self Beliefs
+-- =========================================
+INSERT INTO npc_self_belief
+(idNPC, beliefType, beliefValue, confidence, stability)
+VALUES
+(
+ (SELECT idNPC FROM NPC WHERE nameFirst = 'Elara'),
+ 'personality_trait',
+ 'emotionally controlled',
+ 0.9,
+ 0.85
+),
+(
+ (SELECT idNPC FROM NPC WHERE nameFirst = 'Elara'),
+ 'personality_trait',
+ 'cannot tolerate betrayal',
+ 0.95,
+ 0.9
+),
+(
+ (SELECT idNPC FROM NPC WHERE nameFirst = 'Elara'),
+ 'goal',
+ 'identify morally consistent individuals',
+ 0.8,
+ 0.75
+);
+
+
 
 
 

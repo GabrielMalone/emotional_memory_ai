@@ -1191,6 +1191,23 @@ MEMORY_SCHEMA_INSTRUCTIONS = """
     - <bullet summary line>
     - <bullet summary line>
 
+    Compression Rules:
+    - Retain the 5 most recent episodes fully detailed.
+    - Preserve any episode with Intensity >= 0.95 OR containing high factual or identity relevance.
+    - ALSO preserve any episode that establishes HIGH RELEVANCE.
+
+    An episode is HIGH RELEVANCE if it:
+    - Introduces a new factual anchor (name, date, place, role, number)
+    - Defines a core belief or moral claim
+    - Alters trust or relationship status
+    - Establishes long-term goals or secrets
+    - Represents a boundary rupture
+
+    - When compressing, retain any concrete factual details explicitly in bullet form.
+    Do not abstract these into vague descriptions.
+    - Never generalize or remove names, dates, numbers, locations, job titles, or stated moral claims.
+    - If a compressed episode contains factual anchors, include them explicitly in the bullet summary
+
     EPISODES (in order)
     [most recent episodes continue here]
 
@@ -1348,6 +1365,25 @@ def update_structured_kbtext(
     - Interpret emotions and motivations according to trust and personality.
     - Notes (my bias) should reflect emotion + beliefs.
     - Include only beliefs directly influencing this moment (max 6 each).
+
+    FACT PRESERVATION RULES (STRICT)
+
+    When compressing episodes, you MUST preserve specific factual anchors verbatim if they appear:
+
+    - Dates (years, exact times, ages)
+    - Place names (cities, states, schools, companies)
+    - Dollar amounts or numbers
+    - Names of people
+    - Job titles or roles
+    - Specific claims stated as facts
+    - Any self-defining moral statements
+
+    If an episode contains factual anchors, you may compress emotional interpretation,
+    but you must retain those factual details explicitly inside the compressed summary.
+
+    Never generalize or abstract away specific names, dates, numbers, or locations.
+    Never replace them with vague summaries.
+
 
     RELATIONSHIP CONTEXT
     --------------------

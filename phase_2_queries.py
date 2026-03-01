@@ -182,6 +182,7 @@ def build_prompt(idNPC: int, idUser: int) -> str:
         RECENT DIALOGUE (short-term, not yet consolidated)
         --------------------------------------------------
         {recent_dialogue if recent_dialogue else "None"}
+        - Make sure to not repreat phrases in recent dialogue
 
         RESPONSE PRIORITY RULES
         -----------------------
@@ -204,13 +205,11 @@ def build_prompt(idNPC: int, idUser: int) -> str:
         ------------------
         - Respond directly to what the player just said.
         - If the player asks a direct question, answer it clearly.
-        - One conversational beat.
         - No narration.
         - No stage directions.
-        - Speak only in first-person dialogue.
+        - IMPORTANT: Speak only in first-person dialogue. 
         - Do not repeat your previous line.
         """
-
 
         return prompt.strip()
 
