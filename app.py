@@ -369,30 +369,38 @@ def process_one_exchange(idNPC: int, idUser: int) -> bool:
         db.close()
         return False  # nothing to process
 
-    player_text = None
-    npc_text = None
-    npc_emotion = None
-    npc_intensity = None
+    exchanges = []
     buffer_ids = []
+
+    pending_player = None
+    pending_player_id = None
 
     for r in rows:
 
-        if r.get("playerText") and player_text is None:
-            player_text = r["playerText"]
-            buffer_ids.append(r["idBuffer"])
+        if r.get("playerText"):
+            pending_player = r["playerText"]
+            pending_player_id = r["idBuffer"]
             continue
 
-        if r.get("npcText") and player_text is not None:
-            npc_text = r["npcText"]
-            npc_emotion = r.get("npcEmotion")
-            npc_intensity = r.get("npcIntensity")
-            buffer_ids.append(r["idBuffer"])
-            break
+        if r.get("npcText") and pending_player:
 
-    if not player_text or not npc_text:
+            exchanges.append({
+                "player_text": pending_player,
+                "npc_text": r["npcText"],
+                "npc_emotion": r.get("npcEmotion"),
+                "npc_intensity": r.get("npcIntensity")
+            })
+
+            buffer_ids.extend([pending_player_id, r["idBuffer"]])
+
+            pending_player = None
+            pending_player_id = None
+
+    # require at least one complete player → npc exchange
+    if len(exchanges) < 1:
         cursor.close()
         db.close()
-        return False  # incomplete exchange
+        return False
 
     kbtext_current = get_mem(idNPC=idNPC, idUser=idUser)
 
@@ -404,13 +412,7 @@ def process_one_exchange(idNPC: int, idUser: int) -> bool:
         idUser=idUser,
         idNPC=idNPC,
         kbtext_current=kbtext_current,
-        player_text=player_text,
-        npc_text=npc_text,
-        player_cls=None,
-        npc_reaction={
-            "emotion": npc_emotion,
-            "intensity": npc_intensity
-        },
+        exchanges=exchanges,
         relevant_self_beliefs=relevant_self_beliefs,
         relevant_player_beliefs=relevant_player_beliefs,
     )
@@ -434,7 +436,7 @@ def process_one_exchange(idNPC: int, idUser: int) -> bool:
     cursor.close()
     db.close()
 
-    print(f"[MEMORY WORKER] Processed exchange for User {player_text} \n NPC {npc_text}")
+    print(f"[MEMORY WORKER] Processed {len(exchanges)} exchanges")
 
     return True  # successfully processed
 

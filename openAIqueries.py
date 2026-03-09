@@ -1241,13 +1241,12 @@ def update_structured_kbtext(
     idUser: int,
     idNPC: int,
     kbtext_current: str,
-    player_text: str | None,
-    npc_text: str | None,
-    player_cls: dict | None,
-    npc_reaction: dict | None,
+    exchanges: list[dict],
     relevant_self_beliefs: list,
     relevant_player_beliefs: list,
-    max_chars: int = 12000
+    scene_soft_cap: int = 12000,      # trigger compression
+    scene_hard_cap: int = 40000,      # max scene size
+    kb_hard_cap: int = 350000         # ~100k tokens
 ) -> str:
     """
     LLM-determined scene structuring.
@@ -1256,27 +1255,42 @@ def update_structured_kbtext(
     client = get_deepseek_client()
 
     print(f"\nUPDATING KB\n")
+    if not exchanges:
+        return kbtext_current or ""
 
     past_memory, current_scene, _ = get_most_recent_scene(kbtext_current or "")
 
     scene_for_llm = current_scene or "EMPTY"
 
+    scene_len = len(scene_for_llm)
+
     episode_count = scene_for_llm.count("\n[")
-    should_compress_scene = episode_count >= 5
+
+    should_compress_scene = (
+        episode_count >= 5
+        or scene_len > scene_soft_cap
+    )
 
 
     compression_instruction = ""
+
     if should_compress_scene:
 
         print("\nCOMPRESSING SCENE\n")
 
-        compression_instruction = """
+        compression_instruction = f"""
         The current scene has grown long.
+
         Compress older low-intensity episodes within THIS SCENE.
+
         Keep the 5 most recent episodes fully detailed.
         Preserve any episode with Intensity >= 0.95.
+
         Replace older compressed episodes with a short bullet summary under:
         EPISODES (compressed)
+
+        Current scene size: {scene_len} characters.
+        Target scene size: under {scene_hard_cap} characters.
     """
 
     # --------------------------------------------------
@@ -1292,6 +1306,8 @@ def update_structured_kbtext(
     """, (idNPC, idUser))
 
     rel = cursor.fetchone()
+    cursor.close()
+    db.close()
 
     trust = rel["trust"] if rel else 50
     was_enemy = rel["wasEnemy"] if rel else 0
@@ -1304,13 +1320,11 @@ def update_structured_kbtext(
     # --------------------------------------------------
     # Emotional context
     # --------------------------------------------------
-    perceived_player_emotion = (player_cls or {}).get("emotion", "calm")
-    perceived_player_intensity = clamp01((player_cls or {}).get("intensity", 0.3))
+    episode_intensity = 0.3
 
-    npc_emotion = (npc_reaction or {}).get("emotion", "calm")
-    npc_intensity = clamp01((npc_reaction or {}).get("intensity", 0.3))
-
-    episode_intensity = clamp01(max(perceived_player_intensity, npc_intensity))
+    for ex in exchanges:
+        npc_intensity = clamp01(ex.get("npc_intensity", 0.3))
+        episode_intensity = max(episode_intensity, npc_intensity)
 
     # --------------------------------------------------
     # Belief formatting
@@ -1399,38 +1413,71 @@ def update_structured_kbtext(
 
     {compression_instruction}
     """
+    # --------------------------------------------------
+    # Build exchange blocks
+    # --------------------------------------------------
+
+    context_blocks = []
+    primary_block = ""
+
+    for i, ex in enumerate(exchanges, start=1):
+
+        block = f"""
+    TURN {i}
+
+    Player said:
+    \"\"\"{ex.get("player_text","")}\"\"\"
+
+    NPC responded:
+    \"\"\"{ex.get("npc_text","")}\"\"\"
+
+    NPC reaction:
+    {{
+        "emotion": "{ex.get("npc_emotion","calm")}",
+        "intensity": {ex.get("npc_intensity", 0.3)}
+    }}
+    """.strip()
+
+        if i == len(exchanges):
+            primary_block = block
+        else:
+            context_blocks.append(block)
+
+    context_text = "\n\n".join(context_blocks)
+
 
     # --------------------------------------------------
     # User Prompt
     # --------------------------------------------------
+
     user = f"""
-        CURRENT SCENE:
-        \"\"\"{scene_for_llm}\"\"\"
+    CURRENT SCENE:
+    \"\"\"{scene_for_llm}\"\"\"
 
-        NEW TURN DATA:
+    NEW TURN DATA
 
-        Player said:
-        \"\"\"{player_text or ""}\"\"\"
+    CONTEXT EXCHANGES
+    {context_text}
 
-        Player classifier:
-        {json.dumps(player_cls or {}, ensure_ascii=False)}
+    PRIMARY EXCHANGE
+    {primary_block}
 
-        NPC responded:
-        \"\"\"{npc_text or ""}\"\"\"
+    Candidate beliefs:
+    {self_belief_text}
+    {player_belief_text}
 
-        NPC reaction:
-        {json.dumps(npc_reaction or {}, ensure_ascii=False)}
+    Process exchanges in chronological order.
+    Context exchanges provide narrative buildup.
+    The PRIMARY EXCHANGE is the key moment that should anchor the new episode.
 
-        Candidate beliefs:
-        {self_belief_text}
-        {player_belief_text}
+    Update the scene document.
+    """
 
-        Update the scene document.
-        """
 
     # --------------------------------------------------
     # LLM Call
     # --------------------------------------------------
+
     resp = client.chat.completions.create(
         model="deepseek-reasoner",
         temperature=0.0,
@@ -1442,17 +1489,24 @@ def update_structured_kbtext(
 
     updated = (resp.choices[0].message.content or "").strip()
 
+
     # --------------------------------------------------
     # Structural Guard
     # --------------------------------------------------
+
     if "=== SCENE:" not in updated or "--- END SCENE ---" not in updated:
+
         safe = kbtext_current or ""
-        if player_text:
-            safe += f"\n\n[{datetime.now()}] Player: {player_text}"
-        if npc_text:
-            safe += f"\n[{datetime.now()}] NPC: {npc_text}"
+
+        for ex in exchanges:
+            if ex.get("player_text"):
+                safe += f"\n\n[{datetime.now()}] Player: {ex['player_text']}"
+            if ex.get("npc_text"):
+                safe += f"\n[{datetime.now()}] NPC: {ex['npc_text']}"
+
         return safe
-    
+
+
     # --------------------------------------------------
     # Reassemble Full Memory (past + updated scene)
     # --------------------------------------------------
@@ -1462,7 +1516,34 @@ def update_structured_kbtext(
     else:
         final_memory = updated
 
-    # print(f"\nUPDATED MEM: {final_memory}\n")
+
+    # ----------------------------------------
+    # Scene hard cap safeguard
+    # ----------------------------------------
+
+    past_memory2, latest_scene, _ = get_most_recent_scene(final_memory)
+
+    if latest_scene and len(latest_scene) > scene_hard_cap:
+        print("\nSCENE HARD CAP TRIGGERED\n")
+
+        latest_scene = latest_scene[:scene_hard_cap]
+
+        if past_memory2:
+            final_memory = past_memory2.rstrip() + "\n\n" + latest_scene
+        else:
+            final_memory = latest_scene
+
+
+    # ----------------------------------------
+    # KB hard cap safeguard (~100k tokens)
+    # ----------------------------------------
+
+    if len(final_memory) > kb_hard_cap:
+
+        print("\nKB HARD CAP TRIGGERED\n")
+
+        final_memory = final_memory[-kb_hard_cap:]
+
 
     return final_memory
 
